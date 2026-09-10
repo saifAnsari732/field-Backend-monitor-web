@@ -443,7 +443,7 @@ async function parseNaturalLanguage(text) {
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -503,7 +503,7 @@ async function transcribeVoice(fileUrl) {
   const base64 = buffer.toString('base64');
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_API_KEY}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -560,6 +560,7 @@ async function routeCommand(ctx, rawCmd) {
       case '/reject': return await cmdReject(ctx, arg1, arg2, rest);
       case '/block': return await cmdBlockToggle(ctx, 'block', parts.slice(1).join(' '));
       case '/unblock': return await cmdBlockToggle(ctx, 'unblock', parts.slice(1).join(' '));
+      case '/agent': return await cmdAgent(ctx, parts.slice(1).join(' '));
       case '/help': return await cmdHelp(ctx);
       case '/status':
       case '/ping':
@@ -573,6 +574,25 @@ async function routeCommand(ctx, rawCmd) {
   }
 }
 
+// ─── /agent — OpenClaw AI Agent (Complex queries) ──────────────────────────
+async function cmdAgent(ctx, query) {
+  if (!query) return safeReply(ctx, `Usage: /agent your question here\n\nExample: /agent Ritesh ki aaj ki attendance aur expenses dikhao`);
+
+  try {
+    const { executeAgent } = require('./agent.engine');
+    const result = await executeAgent(query);
+    
+    if (result?.response) {
+      // Agent response is plain text, send as-is
+      await ctx.reply(result.response, {});
+    } else {
+      await safeReply(ctx, `❌ Agent returned no response`);
+    }
+  } catch (err) {
+    await safeReply(ctx, `❌ Agent error: ${esc(err.message?.slice(0, 200))}`);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // BOT SETUP
 // ═══════════════════════════════════════════════════════════════════════════
@@ -582,39 +602,71 @@ if (bot) {
   bot.help((ctx) => cmdHelp(ctx));
 
   // Direct command handlers
-  const directCmds = ['dashboard', 'employees', 'live', 'attendance', 'tasks', 'meetings', 'expenses', 'leaves', 'leads', 'report', 'approve', 'reject', 'block', 'unblock', 'status', 'ping', 'help'];
+  const directCmds = ['dashboard', 'employees', 'live', 'attendance', 'tasks', 'meetings', 'expenses', 'leaves', 'leads', 'report', 'approve', 'reject', 'block', 'unblock', 'agent', 'status', 'ping', 'help'];
   directCmds.forEach(c => {
     bot.command(c, async (ctx) => routeCommand(ctx, ctx.message.text));
   });
 
-  // Natural language text handler
+  // Natural language text — Use AI Agent for complex queries
   bot.on('text', async (ctx) => {
     const text = ctx.message?.text || '';
     if (!text || text.startsWith('/')) return;
     
-    await ctx.reply('🔍 Processing your message...');
+    await ctx.reply('🤖 AI Agent processing...');
+    
+    // Try direct command parsing first
     const parsed = await parseNaturalLanguage(text);
-    await routeCommand(ctx, parsed);
+    
+    if (parsed.startsWith('/') && parsed !== '/help') {
+      // Parsed into a known command
+      await routeCommand(ctx, parsed);
+    } else {
+      // Complex query — use OpenClaw Agent Engine
+      try {
+        const { executeAgent } = require('./agent.engine');
+        const result = await executeAgent(text);
+        if (result?.response) {
+          await ctx.reply(result.response, {});
+        } else {
+          await safeReply(ctx, `❓ Could not process your request\\. Try /help`);
+        }
+      } catch (err) {
+        await safeReply(ctx, `❌ ${esc(err.message?.slice(0, 100))}`);
+      }
+    }
   });
 
-  // Voice handler
+  // Voice — Transcribe then route through Agent
   bot.on('voice', async (ctx) => {
     try {
       await ctx.reply('🎙 Processing voice command...');
       const fileId = ctx.message.voice.file_id;
       const fileLink = await ctx.telegram.getFileLink(fileId);
       const command = await transcribeVoice(fileLink.href);
-      await routeCommand(ctx, command);
+      
+      if (command.startsWith('/') && command !== '/help') {
+        await routeCommand(ctx, command);
+      } else {
+        // Complex voice query — use Agent Engine
+        const { executeAgent } = require('./agent.engine');
+        const result = await executeAgent(command);
+        if (result?.response) {
+          await ctx.reply(result.response, {});
+        } else {
+          await safeReply(ctx, `❓ Voice command unclear\\. Try again\\.`);
+        }
+      }
     } catch (err) {
       await safeReply(ctx, `❌ Voice error: ${esc(err.message?.slice(0, 100))}`);
     }
   });
 
   bot.launch();
-  console.log('🤖 Telegram CRM Bot started (Direct DB, Full Admin Power)');
+  console.log('🤖 Telegram CRM Bot started (Direct DB + OpenClaw Agent Engine)');
 
   process.once('SIGINT', () => bot.stop('SIGINT'));
   process.once('SIGTERM', () => bot.stop('SIGTERM'));
 }
 
 module.exports = { bot };
+

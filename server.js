@@ -28,7 +28,7 @@ app.set('trust proxy', 1);
 // Allowed origins list for CORS
 const allowedOrigins = [
   'https://tm24news.com',
-  'https://tm24news.in',
+  'https://tm24news.in',  
   'https://www.tm24news.in', 
   "http://localhost:8081",
   "http://localhost:3000",
@@ -38,7 +38,7 @@ const allowedOrigins = [
   'https://tm-24news.vercel.app',
   'https://tm24news.vercel.app',
   'https://crm-front-sand.vercel.app'
-];
+]; 
 
 // 🔴 यहाँ EXPRESS API के लिए CORS लगाना ज़रूरी है (इसे अपने कोड में जोड़ें):
 app.use(cors({
@@ -114,6 +114,7 @@ app.use('/api/manager', require('./routes/manager.routes'));
 app.use('/api/notifications', require('./routes/notification.routes'));
 app.use('/api/leaves', require('./routes/leave.routes'));
 app.use('/api/tasks', require('./routes/task.routes'));
+app.use('/api/agent', require('./routes/agent.routes'));
 // Mock dashboard route since local backend is missing dashboard.routes.js
 
 app.get('/api/dashboard/stats', (req, res) => {
@@ -133,6 +134,11 @@ app.use('/api', require('./routes/newsRouts'));
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'OK', timestamp: new Date() }));
+
+// Telegram bot bootstrap
+if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_ADMIN_TOKEN) {
+  require('./telegram.bot');
+}
 
 // Socket.IO Logic
 const socketHandler = require('./socket/socket.handler');
