@@ -263,6 +263,26 @@ exports.getAttendanceReport = async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
+exports.adjustTrackingDistance = async (req, res) => {
+  try {
+    const { sessionId, distanceToAdd } = req.body;
+    if (!sessionId || !distanceToAdd) return res.status(400).json({ success: false, message: 'Session ID and distance required' });
+
+    const session = await LiveLocation.findById(sessionId);
+    if (!session) return res.status(404).json({ success: false, message: 'Session not found' });
+
+    const added = Number(distanceToAdd);
+    session.totalDistance += added;
+    session.manualDistanceAdded = (session.manualDistanceAdded || 0) + added;
+    
+    await session.save();
+
+    res.json({ success: true, message: `Successfully added ${added} km`, session });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 exports.getTrackingHistory = async (req, res) => {
   try {
     const { employeeId, date, page = 1, limit = 100 } = req.query;

@@ -11,6 +11,7 @@ router.put('/employees/:id/approve', protect, authorize('admin', 'hr'), ac.appro
 router.put('/employees/:id/block', protect, authorize('admin', 'hr'), ac.toggleBlock);
 router.get('/attendance', protect, authorize('admin', 'hr'), ac.getAttendanceReport);
 router.get('/tracking-history', protect, authorize('admin', 'hr'), ac.getTrackingHistory);
+router.put('/tracking/adjust-distance', protect, authorize('admin', 'hr'), ac.adjustTrackingDistance);
 router.put('/employees/:id', protect, authorize('admin', 'hr'), ac.updateEmployee);
 router.get('/reports/consolidated', protect, authorize('admin', 'hr'), rc.getConsolidatedReport);
 router.get('/managers', protect, authorize('admin', 'hr'), ac.getManagers);

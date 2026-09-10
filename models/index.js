@@ -17,6 +17,7 @@ const liveLocationSchema = new mongoose.Schema({
   startAddress: String,
   endAddress: String,
   totalDistance: { type: Number, default: 0 }, // in km
+  manualDistanceAdded: { type: Number, default: 0 }, // admin manually added km
   isActive: { type: Boolean, default: true },
   date: { type: String }, // YYYY-MM-DD
 }, { timestamps: true });
