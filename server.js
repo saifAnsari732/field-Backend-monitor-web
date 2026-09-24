@@ -28,7 +28,7 @@ app.set('trust proxy', 1);
 // Allowed origins list for CORS
 const allowedOrigins = [
   'https://tm24news.com',
-  'https://tm24news.in',  
+  'https://tm24news.in',   
   'https://www.tm24news.in', 
   "http://localhost:8081",
   "http://localhost:3000",
