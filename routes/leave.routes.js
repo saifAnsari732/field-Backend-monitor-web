@@ -1,15 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const leaveController = require('../controllers/leave.controller');
-const { protect, authorize } = require('../middleware/auth.middleware');
+const { protect, authorize, requireActivePlan } = require('../middleware/auth.middleware');
 
 router.use(protect);
 
-router.post('/apply', authorize('employee'), leaveController.applyLeave);
-router.get('/my', authorize('employee'), leaveController.getMyLeaves);
+router.post('/apply', requireActivePlan, leaveController.applyLeave);
+router.get('/my', leaveController.getMyLeaves);
 
-router.get('/all', authorize('admin', 'hr'), leaveController.getAllLeaves);
-router.patch('/:id/status', authorize('admin', 'hr'), leaveController.updateLeaveStatus);
+router.get('/all', authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), leaveController.getAllLeaves);
+router.patch('/:id/status', authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), requireActivePlan, leaveController.updateLeaveStatus);
 
-router.delete('/:id', authorize('admin', 'hr'), leaveController.deleteLeave);
 module.exports = router;

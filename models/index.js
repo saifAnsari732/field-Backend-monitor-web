@@ -1,7 +1,9 @@
 const mongoose = require('mongoose');
+const Organization = require('./Organization.model');
 
 // ─── Live Location ────────────────────────────────────────────────────────────
 const liveLocationSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   sessionId: { type: String, required: true },
   coordinates: [{
@@ -9,6 +11,7 @@ const liveLocationSchema = new mongoose.Schema({
     lng: Number,
     speed: Number,
     accuracy: Number,
+    battery: Number,
     address: String,
     timestamp: { type: Date, default: Date.now },
   }],
@@ -16,18 +19,19 @@ const liveLocationSchema = new mongoose.Schema({
   endTime: Date,
   startAddress: String,
   endAddress: String,
-  totalDistance: { type: Number, default: 0 }, // in km
+  totalDistance: { type: Number, default: 0 }, // in km (Calculated with Haversine distance rules)
   manualDistanceAdded: { type: Number, default: 0 }, // admin manually added km
   isActive: { type: Boolean, default: true },
   date: { type: String }, // YYYY-MM-DD
 }, { timestamps: true });
 
-liveLocationSchema.index({ employee: 1, date: -1 });
+liveLocationSchema.index({ organizationId: 1, employee: 1, date: -1 });
+liveLocationSchema.index({ organizationId: 1, isActive: 1 });
 liveLocationSchema.index({ sessionId: 1 });
-liveLocationSchema.index({ isActive: 1 });
 
 // ─── Meeting ──────────────────────────────────────────────────────────────────
 const meetingSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   clientName: { type: String, required: true },
   companyName: String,
@@ -38,15 +42,17 @@ const meetingSchema = new mongoose.Schema({
   dealAmount: { type: Number, default: 0 },
   followUpDate: Date,
   images: [String],
+  selfieUrl: { type: String, default: '' },
   location: { lat: Number, lng: Number },
   date: { type: Date, default: Date.now },
-}, { timestamps: true });
+}, { timestamps: true, strict: false });
 
-meetingSchema.index({ employee: 1, date: -1 });
-meetingSchema.index({ status: 1 });
+meetingSchema.index({ organizationId: 1, employee: 1, date: -1 });
+meetingSchema.index({ organizationId: 1, status: 1 });
 
 // ─── Expense ──────────────────────────────────────────────────────────────────
 const expenseSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   category: { type: String, enum: ['fuel', 'food', 'hotel', 'travel', 'misc'], required: true },
   amount: { type: Number, required: true },
@@ -56,7 +62,7 @@ const expenseSchema = new mongoose.Schema({
   travelDetails: {
     mode: { type: String, enum: ['bike', 'train', 'bus', 'taxi'] },
     source: String,
-    destination: String
+    destination: String,
   },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
   approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -64,11 +70,12 @@ const expenseSchema = new mongoose.Schema({
   rejectionReason: String,
 }, { timestamps: true });
 
-expenseSchema.index({ employee: 1, date: -1 });
-expenseSchema.index({ status: 1 });
+expenseSchema.index({ organizationId: 1, employee: 1, date: -1 });
+expenseSchema.index({ organizationId: 1, status: 1 });
 
 // ─── Attendance ───────────────────────────────────────────────────────────────
 const attendanceSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   date: { type: String, required: true }, // YYYY-MM-DD
   checkIn: Date,
@@ -77,12 +84,19 @@ const attendanceSchema = new mongoose.Schema({
   totalWorkHours: Number,
   trackingSessions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LiveLocation' }],
   totalDistanceTraveled: { type: Number, default: 0 },
-}, { timestamps: true });
+  checkInImage: { type: String, default: '' },
+  checkOutImage: { type: String, default: '' },
+  selfie: { type: String, default: '' },
+  photo: { type: String, default: '' },
+  isLate: { type: Boolean, default: false },
+}, { timestamps: true, strict: false });
 
-attendanceSchema.index({ employee: 1, date: -1 }, { unique: true });
+attendanceSchema.index({ organizationId: 1, employee: 1, date: -1 }, { unique: true });
+attendanceSchema.index({ organizationId: 1, date: 1, status: 1 });
 
 // ─── Activity Log ─────────────────────────────────────────────────────────────
 const activityLogSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   action: { type: String, required: true },
   description: String,
@@ -90,8 +104,11 @@ const activityLogSchema = new mongoose.Schema({
   ip: String,
 }, { timestamps: true });
 
+activityLogSchema.index({ organizationId: 1, employee: 1, createdAt: -1 });
+
 // ─── Notification ─────────────────────────────────────────────────────────────
 const notificationSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   recipient: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   type: { type: String, enum: ['expense', 'meeting', 'tracking', 'alert', 'system', 'attendance', 'leave', 'task', 'lead'] },
@@ -101,11 +118,12 @@ const notificationSchema = new mongoose.Schema({
   data: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 
-notificationSchema.index({ recipient: 1, createdAt: -1 });
+notificationSchema.index({ organizationId: 1, recipient: 1, createdAt: -1 });
 notificationSchema.index({ isRead: 1 });
 
 // ─── Leave ────────────────────────────────────────────────────────────────────
 const leaveSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   type: { type: String, enum: ['sick', 'casual', 'annual', 'other'], default: 'casual' },
   startDate: { type: Date, required: true },
@@ -118,10 +136,11 @@ const leaveSchema = new mongoose.Schema({
   duration: Number, // in days
 }, { timestamps: true });
 
-leaveSchema.index({ employee: 1, status: 1 });
+leaveSchema.index({ organizationId: 1, employee: 1, status: 1 });
 
 // ─── Task ─────────────────────────────────────────────────────────────────────
 const taskSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   title: { type: String, required: true },
   description: String,
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -130,15 +149,16 @@ const taskSchema = new mongoose.Schema({
   status: { type: String, enum: ['pending', 'in-progress', 'completed', 'overdue'], default: 'pending' },
   priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
   completedAt: Date,
-  duration: String, // e.g. "2 hrs"
+  duration: String,
   location: { lat: Number, lng: Number, address: String },
 }, { timestamps: true });
 
-taskSchema.index({ employee: 1, status: 1 });
-taskSchema.index({ assignedBy: 1 });
+taskSchema.index({ organizationId: 1, employee: 1, status: 1 });
+taskSchema.index({ organizationId: 1, assignedBy: 1 });
 
 // ─── Lead ─────────────────────────────────────────────────────────────────────
 const leadSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   name: { type: String, required: true },
   contactNo: { type: String, required: true },
   address: String,
@@ -148,10 +168,11 @@ const leadSchema = new mongoose.Schema({
   lastContacted: Date,
 }, { timestamps: true });
 
-leadSchema.index({ assignedTo: 1, status: 1 });
+leadSchema.index({ organizationId: 1, assignedTo: 1, status: 1 });
 
 // ─── Travel Log ───────────────────────────────────────────────────────────────
 const travelLogSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   mode: { type: String, enum: ['bus', 'train', 'other'], required: true },
   source: { type: String, required: true },
@@ -161,9 +182,10 @@ const travelLogSchema = new mongoose.Schema({
   amount: Number,
 }, { timestamps: true });
 
-travelLogSchema.index({ employee: 1, date: -1 });
+travelLogSchema.index({ organizationId: 1, employee: 1, date: -1 });
 
 module.exports = {
+  Organization,
   LiveLocation: mongoose.model('LiveLocation', liveLocationSchema),
   Meeting: mongoose.model('Meeting', meetingSchema),
   Expense: mongoose.model('Expense', expenseSchema),

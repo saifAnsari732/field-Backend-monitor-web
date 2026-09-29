@@ -27,13 +27,31 @@ module.exports = (io) => {
     // Update user socket ID and online status
     await User.findByIdAndUpdate(user._id, { socketId: socket.id, isOnline: true });
 
-    // Join role-based rooms
-    if (user.role === 'admin' || user.role === 'hr') {
+    const normalizedRole = user.role ? user.role.toUpperCase() : 'EMPLOYEE';
+    const orgId = user.organizationId ? (user.organizationId._id || user.organizationId).toString() : null;
+
+    // Join role-based & organization-based rooms for real-time telemetry
+    if (['ORG_ADMIN', 'ADMIN', 'HR', 'SUPER_ADMIN', 'SUPERADMIN', 'MANAGER'].includes(normalizedRole)) {
       socket.join('admins');
-      // Send current online employees to admin
-      const onlineEmployees = await User.find({ isOnline: true, role: 'employee' })
-        .select('name employeeId isTracking isOnline lastSeen avatar department');
+      if (orgId) {
+        socket.join(`org:${orgId}`);
+        socket.join(`org_${orgId}`);
+      }
+      
+      // Send current online employees to admin (case-insensitive role matching)
+      let empFilter = { isOnline: true, role: { $in: ['EMPLOYEE', 'employee'] } };
+      if (normalizedRole !== 'SUPER_ADMIN' && normalizedRole !== 'SUPERADMIN' && orgId) {
+        empFilter.organizationId = orgId;
+      }
+
+      const onlineEmployees = await User.find(empFilter)
+        .select('name employeeId isTracking isOnline lastSeen avatar department organizationId');
       socket.emit('online_employees', onlineEmployees);
+    }
+
+    if (orgId) {
+      socket.join(`org:${orgId}`);
+      socket.join(`org_${orgId}`);
     }
     socket.join(`user_${user._id}`);
 
@@ -89,16 +107,21 @@ module.exports = (io) => {
           type: 'stationary'
         });
         // Alert admins
-        io.to('admins').emit('employee_stationary', {
+        const alertData = {
           employeeId: user._id,
           name: user.name,
           avatar: user.avatar,
           department: user.department,
+          organizationId: orgId,
           lat,
           lng,
           timestamp: Date.now(),
           message: `${user.name} has been stationary for 5 minutes.`
-        });
+        };
+        io.to('admins').emit('employee_stationary', alertData);
+        if (orgId) {
+          io.to(`org:${orgId}`).emit('employee_stationary', alertData);
+        }
         console.log(`⚠️ Stationary alert sent for ${user.name}`);
       }, NO_MOVE_TIMEOUT);
     }
@@ -111,47 +134,64 @@ module.exports = (io) => {
       if (lastKnownPos && lat && lng) {
         const dist = haversineMeters(lastKnownPos.lat, lastKnownPos.lng, lat, lng);
         if (dist >= MOVE_THRESHOLD_METERS) {
-          // Employee moved — reset timer
           lastKnownPos = { lat, lng };
           resetNoMoveTimer(lat, lng);
         }
-        // else: still stationary, timer keeps running
       } else if (lat && lng) {
-        // First ping
         lastKnownPos = { lat, lng };
         resetNoMoveTimer(lat, lng);
       }
 
-      // Real-time location broadcast to admins
-      io.to('admins').emit('employee_location', {
+      const locationPayload = {
         employeeId: user._id,
         name: user.name,
         avatar: user.avatar,
         department: user.department,
+        organizationId: orgId,
         ...data,
-      });
+      };
+
+      // Real-time location broadcast to admins & organization room
+      io.to('admins').emit('employee_location', locationPayload);
+      if (orgId) {
+        io.to(`org:${orgId}`).emit('employee_location', locationPayload);
+        io.to(`org_${orgId}`).emit('employee_location', locationPayload);
+      }
     });
 
-
     socket.on('tracking_started', (data) => {
-      io.to('admins').emit('employee_tracking_started', {
+      const startedPayload = {
         employeeId: user._id,
         name: user.name,
         avatar: user.avatar,
+        organizationId: orgId,
         ...data,
-      });
+      };
+
+      io.to('admins').emit('employee_tracking_started', startedPayload);
+      if (orgId) {
+        io.to(`org:${orgId}`).emit('employee_tracking_started', startedPayload);
+        io.to(`org_${orgId}`).emit('employee_tracking_started', startedPayload);
+      }
     });
 
     socket.on('tracking_stopped', (data) => {
-      // Clear no-movement timer
       if (noMoveTimer) { clearTimeout(noMoveTimer); noMoveTimer = null; }
       lastKnownPos = null;
       stationaryAlertSent = false;
-      io.to('admins').emit('employee_tracking_stopped', {
+
+      const stoppedPayload = {
         employeeId: user._id,
         name: user.name,
+        organizationId: orgId,
         ...data,
-      });
+      };
+
+      io.to('admins').emit('employee_tracking_stopped', stoppedPayload);
+      if (orgId) {
+        io.to(`org:${orgId}`).emit('employee_tracking_stopped', stoppedPayload);
+        io.to(`org_${orgId}`).emit('employee_tracking_stopped', stoppedPayload);
+      }
     });
 
     // ─── Chat / Notifications ────────────────────────────────────────────────────

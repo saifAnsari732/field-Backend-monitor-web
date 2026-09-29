@@ -2,24 +2,34 @@ const { LiveLocation, Attendance, ActivityLog, Notification } = require('../mode
 const User = require('../models/User.model');
 const { v4: uuidv4 } = require('uuid');
 const { liveCache } = require('../services/cache.service');
+const { reverseGeocode } = require('../services/geocode.service');
 
-// @desc Start tracking session
+// Haversine formula (UNTOUCHED AND PRESERVED EXACTLY)
+function haversineDistance(p1, p2) {
+  const R = 6371;
+  const dLat = toRad(p2.lat - p1.lat);
+  const dLng = toRad(p2.lng - p1.lng);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+function toRad(deg) { return deg * (Math.PI / 180); }
+
+// @desc Start tracking session (with multi-tenant organizationId)
 exports.startTracking = async (req, res) => {
   try {
     const { lat, lng } = req.body;
     const today = new Date().toISOString().slice(0, 10);
+    const orgId = req.user.organizationId?._id || req.user.organizationId || req.user.organization?._id || req.user.organization || null;
 
-    // Start geocoding in background to avoid blocking the response
     const addressPromise = reverseGeocode(lat, lng);
-    
-    // Create session with temporary address if needed, or wait briefly
-    // To keep it simple and responsive, we'll wait max 500ms for geocode
     const address = await Promise.race([
       addressPromise,
-      new Promise(resolve => setTimeout(() => resolve(`Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`), 800))
+      new Promise((resolve) => setTimeout(() => resolve(`Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`), 800)),
     ]);
 
     const session = await LiveLocation.create({
+      organizationId: orgId,
       employee: req.user._id,
       sessionId: uuidv4(),
       coordinates: [{ lat, lng, timestamp: new Date(), address }],
@@ -29,28 +39,31 @@ exports.startTracking = async (req, res) => {
       startTime: new Date(),
     });
 
-    // If geocode finishes later, update the session
     addressPromise.then(async (realAddr) => {
       if (realAddr !== address) {
-        await LiveLocation.findByIdAndUpdate(session._id, { 
+        await LiveLocation.findByIdAndUpdate(session._id, {
           startAddress: realAddr,
-          'coordinates.0.address': realAddr 
+          'coordinates.0.address': realAddr,
         });
       }
     }).catch(() => {});
 
-    await User.findByIdAndUpdate(req.user._id, { 
+    await User.findByIdAndUpdate(req.user._id, {
       isTracking: true,
       isOnline: true,
-      lastSeen: new Date()
+      lastSeen: new Date(),
+      ...(orgId ? { organizationId: orgId } : {}),
     });
 
-    // Attendance check-in
+    // Attendance check-in scoped by organizationId
     let attendance = await Attendance.findOne({ employee: req.user._id, date: today });
     if (!attendance) {
       attendance = await Attendance.create({
-        employee: req.user._id, date: today,
-        checkIn: new Date(), status: 'present',
+        organizationId: orgId,
+        employee: req.user._id,
+        date: today,
+        checkIn: new Date(),
+        status: 'present',
         trackingSessions: [session._id],
       });
     } else {
@@ -59,14 +72,31 @@ exports.startTracking = async (req, res) => {
     }
 
     await ActivityLog.create({
-      employee: req.user._id, action: 'TRACKING_START',
-      description: 'Location tracking started', metadata: { lat, lng, sessionId: session.sessionId }
+      organizationId: orgId,
+      employee: req.user._id,
+      action: 'TRACKING_START',
+      description: 'Location tracking started',
+      metadata: { lat, lng, sessionId: session.sessionId },
     });
 
     const io = req.app.get('io');
-    io.to('admins').emit('employee_tracking_started', {
-      employeeId: req.user._id, name: req.user.name, lat, lng, sessionId: session.sessionId
-    });
+    const trackingPayload = {
+      employeeId: req.user._id,
+      name: req.user.name,
+      lat,
+      lng,
+      sessionId: session.sessionId,
+      organizationId: orgId,
+    };
+
+    io.to('admins').emit('employee_tracking_started', trackingPayload);
+    if (orgId) {
+      io.to(`org:${orgId}`).emit('employee_tracking_started', trackingPayload);
+      if (req.user.managerId || req.user.manager) {
+        const mgrId = req.user.managerId || req.user.manager;
+        io.to(`org:${orgId}:mgr:${mgrId}`).emit('employee_tracking_started', trackingPayload);
+      }
+    }
 
     res.json({ success: true, session });
   } catch (err) {
@@ -74,24 +104,20 @@ exports.startTracking = async (req, res) => {
   }
 };
 
-const { reverseGeocode } = require('../services/geocode.service');
-
 // @desc Update location (bulk coordinates)
 exports.updateLocation = async (req, res) => {
   try {
-    const { sessionId, coordinates } = req.body; 
+    const { sessionId, coordinates } = req.body;
     const session = await LiveLocation.findOne({ sessionId, employee: req.user._id, isActive: true });
     if (!session) return res.status(404).json({ success: false, message: 'Session not found' });
 
-    // Geocode the latest coordinate
     const lastCoord = coordinates[coordinates.length - 1];
     const address = await reverseGeocode(lastCoord.lat, lastCoord.lng);
-    
-    // Add address to coordinates
-    const updatedCoords = coordinates.map(c => ({ ...c, address }));
+
+    const updatedCoords = coordinates.map((c) => ({ ...c, address }));
     session.coordinates.push(...updatedCoords);
 
-    // Calculate distance
+    // Exact Distance calculation rules
     const coords = session.coordinates;
     let totalDist = 0;
     for (let i = 1; i < coords.length; i++) {
@@ -100,16 +126,14 @@ exports.updateLocation = async (req, res) => {
     session.totalDistance = totalDist;
     await session.save();
 
-    // Update user status as they are actively sending locations
     await User.findByIdAndUpdate(req.user._id, {
       isOnline: true,
       isTracking: true,
-      lastSeen: new Date()
+      lastSeen: new Date(),
     });
 
-    // Emit to admin in real-time
     const io = req.app.get('io');
-    io.to('admins').emit('employee_location', {
+    const locationData = {
       employeeId: req.user._id,
       name: req.user.name,
       avatar: req.user.avatar,
@@ -120,7 +144,17 @@ exports.updateLocation = async (req, res) => {
       address,
       totalDistance: totalDist,
       sessionId,
-    });
+      organizationId: req.user.organizationId,
+    };
+
+    io.to('admins').emit('employee_location', locationData);
+    if (req.user.organizationId) {
+      io.to(`org:${req.user.organizationId}`).emit('employee_location', locationData);
+      if (req.user.managerId || req.user.manager) {
+        const mgrId = req.user.managerId || req.user.manager;
+        io.to(`org:${req.user.organizationId}:mgr:${mgrId}`).emit('employee_location', locationData);
+      }
+    }
 
     res.json({ success: true, totalDistance: totalDist });
   } catch (err) {
@@ -137,14 +171,12 @@ exports.stopTracking = async (req, res) => {
 
     session.isActive = false;
     session.endTime = new Date();
-    
-    // Get end address from last coordinate
+
     if (session.coordinates.length > 0) {
       session.endAddress = session.coordinates[session.coordinates.length - 1].address;
     }
-    
-    await session.save();
 
+    await session.save();
     await User.findByIdAndUpdate(req.user._id, { isTracking: false });
 
     const today = new Date().toISOString().slice(0, 10);
@@ -157,15 +189,26 @@ exports.stopTracking = async (req, res) => {
     );
 
     await ActivityLog.create({
-      employee: req.user._id, action: 'TRACKING_STOP',
+      organizationId: req.user.organizationId,
+      employee: req.user._id,
+      action: 'TRACKING_STOP',
       description: `Tracking stopped. Distance: ${totalDist.toFixed(2)} km`,
-      metadata: { sessionId, totalDistance: totalDist }
+      metadata: { sessionId, totalDistance: totalDist },
     });
 
     const io = req.app.get('io');
-    io.to('admins').emit('employee_tracking_stopped', {
-      employeeId: req.user._id, name: req.user.name, sessionId, totalDistance: totalDist
-    });
+    const stopData = {
+      employeeId: req.user._id,
+      name: req.user.name,
+      sessionId,
+      totalDistance: totalDist,
+      organizationId: req.user.organizationId,
+    };
+
+    io.to('admins').emit('employee_tracking_stopped', stopData);
+    if (req.user.organizationId) {
+      io.to(`org:${req.user.organizationId}`).emit('employee_tracking_stopped', stopData);
+    }
 
     res.json({ success: true, totalDistance: totalDist, session });
   } catch (err) {
@@ -173,13 +216,13 @@ exports.stopTracking = async (req, res) => {
   }
 };
 
-// @desc Get today's tracking sessions (optimized: no coordinates)
+// @desc Get today's tracking sessions
 exports.getTodaySessions = async (req, res) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const sessions = await LiveLocation.find(
       { employee: req.user._id, date: today },
-      { coordinates: 0 } // Exclude coordinates for list view performance
+      { coordinates: 0 }
     ).sort({ createdAt: -1 });
     res.json({ success: true, sessions });
   } catch (err) {
@@ -187,32 +230,74 @@ exports.getTodaySessions = async (req, res) => {
   }
 };
 
-// @desc Get session route (admin)
+// @desc Get session route
 exports.getSessionRoute = async (req, res) => {
   try {
-    const session = await LiveLocation.findById(req.params.id).populate('employee', 'name employeeId avatar');
+    const session = await LiveLocation.findById(req.params.id).populate('employee', 'name employeeId avatar organizationId');
     if (!session) return res.status(404).json({ success: false, message: 'Session not found' });
+
+    // Multi-tenant & ownership authorization check
+    const userRole = (req.user.role || '').toUpperCase();
+    const userOrgId = req.user.organizationId?._id?.toString() || req.user.organizationId?.toString();
+    const sessionOrgId = session.organizationId?.toString() || session.employee?.organizationId?.toString();
+
+    if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN') {
+      if (userOrgId && sessionOrgId && userOrgId !== sessionOrgId) {
+        return res.status(403).json({ success: false, message: 'Access denied to session from another organization.' });
+      }
+      if (userRole === 'EMPLOYEE' && session.employee?._id?.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ success: false, message: 'Unauthorized access to this session.' });
+      }
+    }
+
     res.json({ success: true, session });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// @desc Get all live employees (admin)
+// @desc Get all live employees (scoped by tenant and manager)
 exports.getLiveEmployees = async (req, res) => {
   try {
-    const employees = await User.find({ isTracking: true })
-      .select('name employeeId department avatar isTracking isOnline lastSeen');
-    const locations = await LiveLocation.find({
-      isActive: true, date: new Date().toISOString().slice(0, 10)
-    }).populate('employee', 'name employeeId avatar department');
+    const mongoose = require('mongoose');
+    const rawOrgId = req.user.organizationId?._id || req.user.organizationId;
+    const orgObjId = rawOrgId
+      ? (mongoose.Types.ObjectId.isValid(rawOrgId) ? new mongoose.Types.ObjectId(rawOrgId) : rawOrgId)
+      : null;
+    const role = req.user.role ? req.user.role.toUpperCase() : '';
+
+    let userFilter = {};
+    if (role !== 'SUPER_ADMIN' && role !== 'SUPERADMIN' && orgObjId) {
+      userFilter.organizationId = orgObjId;
+      if (role === 'MANAGER') {
+        userFilter.$or = [{ manager: req.user._id }, { managerId: req.user._id }];
+      }
+    }
+    userFilter.role = { $in: ['EMPLOYEE', 'employee', 'MANAGER', 'manager', 'FIELD_EXECUTIVE'] };
+
+    // Get all employees for this organization/scope
+    const employees = await User.find(userFilter)
+      .select('name employeeId department avatar isTracking isOnline lastSeen phone email role')
+      .lean();
+
+    const empIds = employees.map((e) => e._id);
+
+    // Fetch active live tracking sessions for these employees or organization
+    const locFilter = orgObjId
+      ? (empIds.length > 0 ? { $or: [{ organizationId: orgObjId }, { employee: { $in: empIds } }], isActive: true } : { organizationId: orgObjId, isActive: true })
+      : { isActive: true };
+
+    const locations = await LiveLocation.find(locFilter)
+      .populate('employee', 'name employeeId avatar department')
+      .lean();
+
     res.json({ success: true, employees, locations });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// @desc Geocode proxy (frontend calls this instead of Nominatim directly)
+// @desc Geocode proxy
 exports.geocode = async (req, res) => {
   try {
     const { lat, lng } = req.query;
@@ -224,44 +309,54 @@ exports.geocode = async (req, res) => {
   }
 };
 
-// Haversine formula
-function haversineDistance(p1, p2) {
-  const R = 6371;
-  const dLat = toRad(p2.lat - p1.lat);
-  const dLng = toRad(p2.lng - p1.lng);
-  const a = Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) * Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-function toRad(deg) { return deg * (Math.PI / 180); }
-
-// @desc Get live locations (optimized with server-side caching)
+// @desc Get live locations (scoped by tenant and manager)
 exports.getLiveLocations = async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const cacheKey = 'live_locations_all';
-    
-    // Check cache
-    const cachedData = liveCache.get(cacheKey);
-    if (cachedData) {
-      return res.json({ success: true, ...cachedData, fromCache: true });
-    }
-    
-    // Get all active tracking sessions
-    const activeSessions = await LiveLocation.find({
-      isActive: true,
-      date: today,
-    }).populate('employee', 'name employeeId avatar department');
+    const mongoose = require('mongoose');
+    const rawOrgId = req.user.organizationId?._id || req.user.organizationId;
+    const orgObjId = rawOrgId
+      ? (mongoose.Types.ObjectId.isValid(rawOrgId) ? new mongoose.Types.ObjectId(rawOrgId) : rawOrgId)
+      : null;
+    const role = req.user.role ? req.user.role.toUpperCase() : '';
 
-    // Format for frontend
-    const locations = activeSessions.map(session => {
-      const latestCoord = session.coordinates[session.coordinates.length - 1] || {};
+    const cacheKey = `live_loc_${orgObjId || 'all'}_${req.user._id}`;
+    if (liveCache.has(cacheKey)) {
+      return res.json({ success: true, ...liveCache.get(cacheKey) });
+    }
+
+    let userFilter = {};
+    if (role !== 'SUPER_ADMIN' && role !== 'SUPERADMIN' && orgObjId) {
+      userFilter.organizationId = orgObjId;
+      if (role === 'MANAGER') {
+        userFilter.$or = [{ manager: req.user._id }, { managerId: req.user._id }];
+      }
+    }
+
+    const employees = await User.find(userFilter).select('_id');
+    const empIds = employees.map((e) => e._id);
+
+    let sessionFilter = { isActive: true };
+    if (empIds.length > 0) {
+      sessionFilter = {
+        $or: [{ organizationId: orgObjId }, { employee: { $in: empIds } }],
+        isActive: true,
+      };
+    } else if (orgObjId && role !== 'SUPER_ADMIN' && role !== 'SUPERADMIN') {
+      sessionFilter.organizationId = orgObjId;
+    }
+
+    const activeSessions = await LiveLocation.find(sessionFilter)
+      .populate('employee', 'name employeeId avatar department')
+      .lean();
+
+    const locations = activeSessions.map((session) => {
+      const latestCoord = session.coordinates?.[session.coordinates.length - 1] || {};
       return {
-        employeeId: session.employee._id,
-        name: session.employee.name,
-        employeeIdCode: session.employee.employeeId,
-        avatar: session.employee.avatar,
-        department: session.employee.department,
+        employeeId: session.employee?._id || session.employee,
+        name: session.employee?.name || 'Field Staff',
+        employeeIdCode: session.employee?.employeeId,
+        avatar: session.employee?.avatar,
+        department: session.employee?.department,
         lat: latestCoord.lat,
         lng: latestCoord.lng,
         speed: latestCoord.speed || 0,
@@ -274,9 +369,7 @@ exports.getLiveLocations = async (req, res) => {
     });
 
     const responseData = { locations, count: locations.length };
-    
-    // Store in cache for 10 seconds (very short but helps with burst requests)
-    liveCache.set(cacheKey, responseData, 10);
+    liveCache.set(cacheKey, responseData, 5);
 
     res.json({ success: true, ...responseData });
   } catch (err) {
@@ -284,119 +377,76 @@ exports.getLiveLocations = async (req, res) => {
   }
 };
 
-// @desc Get employee report (with date range)
+// @desc Get employee report
 exports.getEmployeeReport = async (req, res) => {
   try {
     const { employeeId } = req.params;
     const { startDate, endDate } = req.query;
+    const userRole = (req.user.role || '').toUpperCase();
+    const userOrgId = req.user.organizationId?._id?.toString() || req.user.organizationId?.toString();
 
-    // Validate authorization: user can only see their own report, admins can see anyone's
-    if (req.user.role === 'employee' && req.user._id.toString() !== employeeId) {
+    if (userRole === 'EMPLOYEE' && req.user._id.toString() !== employeeId) {
       return res.status(403).json({ success: false, message: 'Unauthorized' });
     }
 
-    const employee = await User.findById(employeeId).select('name employeeId department');
+    const employee = await User.findById(employeeId).select('name employeeId department organizationId');
     if (!employee) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
 
-    // Build date filter
-    const query = { employee: employeeId };
-    if (startDate || endDate) {
-      query.date = {};
-      if (startDate) query.date.$gte = startDate;
-      if (endDate) query.date.$lte = endDate;
-    }
-
-    // Get attendance records
-    const attendanceRecords = await Attendance.find(query)
-      .populate('trackingSessions')
-      .sort({ date: -1 });
-
-    // Get tracking sessions for the period
-    const sessions = await LiveLocation.find(query).sort({ date: -1 });
-
-    // Calculate statistics
-    const stats = {
-      totalDays: attendanceRecords.length,
-      presentDays: attendanceRecords.filter(a => a.status === 'present').length,
-      totalDistance: sessions.reduce((sum, s) => sum + (s.totalDistance || 0), 0),
-      totalSessions: sessions.length,
-      averageDistance: 0,
-      totalHours: 0,
-    };
-
-    // Calculate average distance and hours
-    if (sessions.length > 0) {
-      stats.averageDistance = stats.totalDistance / sessions.length;
-    }
-
-    sessions.forEach(session => {
-      if (session.endTime && session.startTime) {
-        const hours = (session.endTime - session.startTime) / (1000 * 60 * 60);
-        stats.totalHours += hours;
+    if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN') {
+      if (userOrgId && employee.organizationId && userOrgId !== employee.organizationId.toString()) {
+        return res.status(403).json({ success: false, message: 'Access denied. Employee belongs to another organization.' });
       }
-    });
+    }
 
-    // Format attendance data
-    const attendanceData = attendanceRecords.map(record => ({
-      date: record.date,
-      checkIn: record.checkIn,
-      checkOut: record.checkOut,
-      status: record.status,
-      totalDistance: record.totalDistanceTraveled || 0,
-      sessionCount: record.trackingSessions?.length || 0,
-    }));
+    let dateFilter = { employee: employeeId };
+    if (startDate && endDate) {
+      dateFilter.date = { $gte: startDate, $lte: endDate };
+    }
 
-    // Format session data
-    const sessionData = sessions.map(session => ({
-      date: session.date,
-      sessionId: session.sessionId,
-      startTime: session.startTime,
-      endTime: session.endTime,
-      distance: session.totalDistance || 0,
-      coordinateCount: session.coordinates?.length || 0,
-      startAddress: session.coordinates?.[0]?.address || 'N/A',
-      endAddress: session.coordinates?.[session.coordinates.length - 1]?.address || 'N/A',
-    }));
+    const sessions = await LiveLocation.find(dateFilter).sort({ date: -1, startTime: -1 });
+    const attendance = await Attendance.find(dateFilter).sort({ date: -1 });
+
+    const totalDistance = sessions.reduce((acc, s) => acc + (s.totalDistance || 0), 0);
+    const presentDays = attendance.filter((a) => a.status === 'present').length;
 
     res.json({
       success: true,
-      employee: {
-        id: employee._id,
-        name: employee.name,
-        employeeId: employee.employeeId,
-        department: employee.department,
+      report: {
+        employee,
+        totalDistance: parseFloat(totalDistance.toFixed(2)),
+        presentDays,
+        totalSessions: sessions.length,
+        sessions,
+        attendance,
       },
-      stats,
-      attendance: attendanceData,
-      sessions: sessionData,
-      generatedAt: new Date(),
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
-// @desc Delete all tracking history for an employee
+
+// @desc Delete employee tracking history
 exports.deleteEmployeeHistory = async (req, res) => {
   try {
     const { employeeId } = req.params;
-    
-    // Optional: Filter by date if needed, but the request says "All history"
-    const result = await LiveLocation.deleteMany({ employee: employeeId });
-    
-    // Log activity
-    await ActivityLog.create({
-      employee: req.user._id,
-      action: 'HISTORY_DELETED',
-      description: `Deleted ${result.deletedCount} tracking records for employee ${employeeId}`
-    });
+    const userRole = (req.user.role || '').toUpperCase();
+    const userOrgId = req.user.organizationId?._id?.toString() || req.user.organizationId?.toString();
 
-    res.json({ 
-      success: true, 
-      message: `Successfully deleted ${result.deletedCount} history records for this employee.`,
-      deletedCount: result.deletedCount
-    });
+    const employee = await User.findById(employeeId).select('organizationId');
+    if (!employee) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN') {
+      if (userOrgId && employee.organizationId && userOrgId !== employee.organizationId.toString()) {
+        return res.status(403).json({ success: false, message: 'Access denied. Employee belongs to another organization.' });
+      }
+    }
+
+    await LiveLocation.deleteMany({ employee: employeeId });
+    res.json({ success: true, message: 'Tracking history deleted successfully' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

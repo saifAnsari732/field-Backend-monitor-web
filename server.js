@@ -24,7 +24,7 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 app.set('trust proxy', 1);
-
+ 
 // Allowed origins list for CORS
 const allowedOrigins = [
   'https://tm24news.com',
@@ -103,6 +103,7 @@ app.set('io', io);
  
 // Routes
 app.use('/api/auth', require('./routes/auth.routes'));
+app.use('/api/superadmin', require('./routes/superadmin.routes'));
 app.use('/api/employees', require('./routes/employee.routes'));
 app.use('/api/tracking', require('./routes/tracking.routes'));
 app.use('/api/meetings', require('./routes/meeting.routes'));
@@ -115,6 +116,7 @@ app.use('/api/notifications', require('./routes/notification.routes'));
 app.use('/api/leaves', require('./routes/leave.routes'));
 app.use('/api/tasks', require('./routes/task.routes'));
 app.use('/api/agent', require('./routes/agent.routes'));
+app.use('/api/payment', require('./routes/payment.routes'));
 // Mock dashboard route since local backend is missing dashboard.routes.js
 
 app.get('/api/dashboard/stats', (req, res) => {
@@ -280,7 +282,8 @@ app.use((err, req, res, next) => {
   });
 });
  
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 module.exports = { app, server, io };
+        
