@@ -1,0 +1,51 @@
+name: Deploy Backend to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to AWS EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH to AWS EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            echo "🚀 Starting Automated Deployment on AWS EC2..."
+            
+            # Navigate to project directory
+            cd ~/backend || { echo "Directory ~/backend not found. Cloning repository..."; git clone https://github.com/saifAnsari732/field-Backend-monitor-web.git ~/backend && cd ~/backend; }
+            
+            # Fetch latest git commits
+            echo "📦 Pulling latest changes from GitHub main branch..."
+            git reset --hard HEAD
+            git pull origin main
+            
+            # Install / update dependencies
+            echo "🔧 Installing npm dependencies..."
+            npm install --production
+            
+            # Reload PM2 process with zero-downtime
+            echo "🔄 Reloading PM2 process 'trackpro-api'..."
+            if pm2 list | grep -q "trackpro-api"; then
+              pm2 reload trackpro-api --update-env
+            else
+              pm2 start server.js --name "trackpro-api"
+            fi
+            
+            # Save PM2 state
+            pm2 save
+            
+            echo "✅ Deployment completed successfully!"
