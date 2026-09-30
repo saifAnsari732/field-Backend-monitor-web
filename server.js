@@ -25,43 +25,27 @@ const app = express();
 const server = http.createServer(app);
 app.set('trust proxy', 1);
  
-// Allowed origins list for CORS
-const allowedOrigins = [
-  'https://tm24news.com',
-  'https://tm24news.in',   
-  'https://www.tm24news.in', 
-  "http://localhost:8081",
-  "http://localhost:3000",
-  "http://localhost:3001",
-  'https://www.tm24news.com',
-  'https://kisanteamweb.it.com',
-  'https://tm-24news.vercel.app',
-  'https://tm24news.vercel.app',
-  'https://crm-front-sand.vercel.app'
-]; 
+// Universal CORS configuration (Allows Vercel, Localhost, Mobile apps, Custom domains)
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Dynamically reflect origin to allow credentials with any origin (Vercel, Localhost, Custom Domains)
+    callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400,
+};
 
-// 🔴 यहाँ EXPRESS API के लिए CORS लगाना ज़रूरी है (इसे अपने कोड में जोड़ें):
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1 || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
-      callback(null, true); 
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  }, 
-  credentials: true
-}));
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, or postman)
-      if (!origin || allowedOrigins.indexOf(origin) !== -1 || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
+      callback(null, true);
     },
     methods: ['GET', 'POST'],
     credentials: true,
@@ -73,25 +57,13 @@ app.use(helmet({
   crossOriginResourcePolicy: false, // Required for cross-origin images/resources
 }));
 app.use(compression());
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1 || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
-}));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500, // limit each IP to 500 requests per windowMs
+  max: 1000, // limit each IP to 1000 requests per windowMs
   message: { success: false, message: 'Too many requests from this IP, please try again after 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false, 
@@ -101,25 +73,78 @@ app.use('/api/', limiter);
 // Make io accessible to routes
 app.set('io', io);
  
-// Routes
-app.use('/api/auth', require('./routes/auth.routes'));
-app.use('/api/superadmin', require('./routes/superadmin.routes'));
-app.use('/api/employees', require('./routes/employee.routes'));
-app.use('/api/tracking', require('./routes/tracking.routes'));
-app.use('/api/meetings', require('./routes/meeting.routes'));
-app.use('/api/expenses', require('./routes/expense.routes'));
-app.use('/api/attendance', require('./routes/attendance.routes'));
-app.use('/api/admin', require('./routes/admin.routes'));
-app.use('/api/manager', require('./routes/manager.routes'));
-  app.use('/api/upload', require('./routes/upload.routes'));
-app.use('/api/notifications', require('./routes/notification.routes'));
-app.use('/api/leaves', require('./routes/leave.routes'));
-app.use('/api/tasks', require('./routes/task.routes'));
-app.use('/api/agent', require('./routes/agent.routes'));
-app.use('/api/payment', require('./routes/payment.routes'));
-// Mock dashboard route since local backend is missing dashboard.routes.js
+// Route Handlers (Mount both with /api and without /api for universal compatibility)
+const authRoutes = require('./routes/auth.routes');
+const superadminRoutes = require('./routes/superadmin.routes');
+const employeeRoutes = require('./routes/employee.routes');
+const trackingRoutes = require('./routes/tracking.routes');
+const meetingRoutes = require('./routes/meeting.routes');
+const expenseRoutes = require('./routes/expense.routes');
+const attendanceRoutes = require('./routes/attendance.routes');
+const adminRoutes = require('./routes/admin.routes');
+const managerRoutes = require('./routes/manager.routes');
+const uploadRoutes = require('./routes/upload.routes');
+const notificationRoutes = require('./routes/notification.routes');
+const leaveRoutes = require('./routes/leave.routes');
+const taskRoutes = require('./routes/task.routes');
+const agentRoutes = require('./routes/agent.routes');
+const paymentRoutes = require('./routes/payment.routes');
+const leadRoutes = require('./routes/lead.routes');
+const newsRoutes = require('./routes/newsRouts');
 
-app.get('/api/dashboard/stats', (req, res) => {
+// API Mounts
+app.use('/api/auth', authRoutes);
+app.use('/auth', authRoutes);
+
+app.use('/api/superadmin', superadminRoutes);
+app.use('/superadmin', superadminRoutes);
+
+app.use('/api/employees', employeeRoutes);
+app.use('/employees', employeeRoutes);
+
+app.use('/api/tracking', trackingRoutes);
+app.use('/tracking', trackingRoutes);
+
+app.use('/api/meetings', meetingRoutes);
+app.use('/meetings', meetingRoutes);
+
+app.use('/api/expenses', expenseRoutes);
+app.use('/expenses', expenseRoutes);
+
+app.use('/api/attendance', attendanceRoutes);
+app.use('/attendance', attendanceRoutes);
+
+app.use('/api/admin', adminRoutes);
+app.use('/admin', adminRoutes);
+
+app.use('/api/manager', managerRoutes);
+app.use('/manager', managerRoutes);
+
+app.use('/api/upload', uploadRoutes);
+app.use('/upload', uploadRoutes);
+
+app.use('/api/notifications', notificationRoutes);
+app.use('/notifications', notificationRoutes);
+
+app.use('/api/leaves', leaveRoutes);
+app.use('/leaves', leaveRoutes);
+
+app.use('/api/tasks', taskRoutes);
+app.use('/tasks', taskRoutes);
+
+app.use('/api/agent', agentRoutes);
+app.use('/agent', agentRoutes);
+
+app.use('/api/payment', paymentRoutes);
+app.use('/payment', paymentRoutes);
+
+app.use('/api/leads', leadRoutes);
+app.use('/leads', leadRoutes);
+
+app.use('/api', newsRoutes);
+
+// Dashboard mock stats
+const dashboardStatsHandler = (req, res) => {
   res.json({
     success: true,
     stats: {
@@ -129,13 +154,13 @@ app.get('/api/dashboard/stats', (req, res) => {
       completedMeetings: 10
     }
   });
-});
-app.use('/api/leads', require('./routes/lead.routes'));
-//  news api
-app.use('/api', require('./routes/newsRouts'));
+};
+app.get('/api/dashboard/stats', dashboardStatsHandler);
+app.get('/dashboard/stats', dashboardStatsHandler);
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'OK', timestamp: new Date() }));
+app.get('/health', (req, res) => res.json({ status: 'OK', timestamp: new Date() }));
 
 // Telegram bot bootstrap
 if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_ADMIN_TOKEN) {
