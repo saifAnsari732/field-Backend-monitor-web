@@ -46,7 +46,13 @@ exports.getLeads = async (req, res) => {
 
     let filter = {};
     if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN' && rawOrgId) {
-      filter.organizationId = rawOrgId;
+      const orgUsers = await User.find({ organizationId: rawOrgId }).select('_id');
+      const orgEmpIds = orgUsers.map((u) => u._id);
+      if (orgEmpIds.length > 0) {
+        filter.$or = [{ organizationId: rawOrgId }, { assignedTo: { $in: orgEmpIds } }, { employee: { $in: orgEmpIds } }];
+      } else {
+        filter.organizationId = rawOrgId;
+      }
     }
 
     const isManagement = ['ADMIN', 'ORG_ADMIN', 'HR', 'SUPER_ADMIN', 'SUPERADMIN'].includes(userRole);
@@ -54,7 +60,7 @@ exports.getLeads = async (req, res) => {
       filter.assignedTo = req.user._id;
     }
 
-    const leads = await Lead.find(filter).populate('assignedTo', 'name email').sort('-createdAt');
+    const leads = await Lead.find(filter).populate('assignedTo', 'name email').sort({ createdAt: -1 });
     res.json({ success: true, leads });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

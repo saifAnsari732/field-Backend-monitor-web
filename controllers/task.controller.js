@@ -109,13 +109,19 @@ exports.getAllTasks = async (req, res) => {
 
     let filter = {};
     if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN' && rawOrgId) {
-      filter.organizationId = rawOrgId;
+      const orgUsers = await User.find({ organizationId: rawOrgId }).select('_id');
+      const orgEmpIds = orgUsers.map((u) => u._id);
+      if (orgEmpIds.length > 0) {
+        filter.$or = [{ organizationId: rawOrgId }, { employee: { $in: orgEmpIds } }];
+      } else {
+        filter.organizationId = rawOrgId;
+      }
       if (userRole === 'MANAGER') {
-        const orgUsers = await User.find({
+        const mgrUsers = await User.find({
           organizationId: rawOrgId,
           $or: [{ manager: req.user._id }, { managerId: req.user._id }],
         }).select('_id');
-        const assignedIds = orgUsers.map((u) => u._id);
+        const assignedIds = mgrUsers.map((u) => u._id);
         filter.employee = { $in: assignedIds };
       }
     }

@@ -342,11 +342,28 @@ exports.approveExpense = async (req, res) => {
 exports.getAllMeetings = async (req, res) => {
   try {
     const { page = 1, limit = 20, employeeId, status } = req.query;
-    const orgFilter = req.user?.organizationId ? { organizationId: req.user.organizationId } : {};
-    const filter = { ...orgFilter };
+    const rawOrgId = req.user?.organizationId?._id || req.user?.organizationId;
+    const userRole = (req.user?.role || '').toUpperCase();
+
+    let filter = {};
+    if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN' && rawOrgId) {
+      const orgUsers = await User.find({ organizationId: rawOrgId }).select('_id');
+      const orgEmpIds = orgUsers.map((u) => u._id);
+      if (orgEmpIds.length > 0) {
+        filter.$or = [{ organizationId: rawOrgId }, { employee: { $in: orgEmpIds } }];
+      } else {
+        filter.organizationId = rawOrgId;
+      }
+    }
+
     if (employeeId) filter.employee = employeeId;
     if (status) filter.status = status;
-    const meetings = await Meeting.find(filter).populate('employee', 'name employeeId department avatar').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(+limit);
+
+    const meetings = await Meeting.find(filter)
+      .populate('employee', 'name employeeId department avatar')
+      .sort({ date: -1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(+limit);
     const total = await Meeting.countDocuments(filter);
     res.json({ success: true, meetings, total, pages: Math.ceil(total / limit) });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
@@ -355,8 +372,22 @@ exports.getAllMeetings = async (req, res) => {
 exports.getAllExpenses = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, employeeId, category } = req.query;
-    const orgFilter = req.user?.organizationId ? { organizationId: req.user.organizationId } : {};
-    const filter = { ...orgFilter };
+    const rawOrgId = req.user?.organizationId?._id || req.user?.organizationId;
+    const userRole = (req.user?.role || '').toUpperCase();
+
+    let filter = {};
+    let orgFilter = {};
+    if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN' && rawOrgId) {
+      orgFilter = { organizationId: rawOrgId };
+      const orgUsers = await User.find({ organizationId: rawOrgId }).select('_id');
+      const orgEmpIds = orgUsers.map((u) => u._id);
+      if (orgEmpIds.length > 0) {
+        filter.$or = [{ organizationId: rawOrgId }, { employee: { $in: orgEmpIds } }];
+      } else {
+        filter.organizationId = rawOrgId;
+      }
+    }
+
     if (status) filter.status = status;
     if (employeeId) filter.employee = employeeId;
     if (category) filter.category = category;
@@ -364,11 +395,11 @@ exports.getAllExpenses = async (req, res) => {
     const [expenses, total, allOrgExpenses] = await Promise.all([
       Expense.find(filter)
         .populate('employee', 'name employeeId department designation avatar phone')
-        .sort({ createdAt: -1 })
+        .sort({ date: -1, createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(+limit),
       Expense.countDocuments(filter),
-      Expense.find(orgFilter).select('amount status')
+      Expense.find(filter).select('amount status')
     ]);
 
     const stats = {
