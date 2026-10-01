@@ -474,27 +474,89 @@ exports.getAttendanceReport = async (req, res) => {
 
 exports.adjustTrackingDistance = async (req, res) => {
   try {
-    const { sessionId, distanceToAdd } = req.body;
-    if (!sessionId || !distanceToAdd) return res.status(400).json({ success: false, message: 'Session ID and distance required' });
-
-    const session = await LiveLocation.findById(sessionId);
-    if (!session) return res.status(404).json({ success: false, message: 'Session not found' });
-
+    const { sessionId, employeeId, date, distanceToAdd, newTotalDistance, mode = 'add', reason } = req.body;
+    
+    let session = null;
     const userRole = (req.user?.role || '').toUpperCase();
     const userOrgId = req.user?.organizationId?._id?.toString() || req.user?.organizationId?.toString();
+
+    if (sessionId) {
+      session = await LiveLocation.findById(sessionId);
+    } else if (employeeId && date) {
+      session = await LiveLocation.findOne({ employee: employeeId, date: date }).sort({ createdAt: -1 });
+      if (!session) {
+        // Create manual credited tracking session for this employee & date
+        const empUser = await User.findById(employeeId);
+        if (!empUser) return res.status(404).json({ success: false, message: 'Employee not found' });
+        
+        session = new LiveLocation({
+          organizationId: empUser.organizationId || userOrgId,
+          employee: employeeId,
+          sessionId: `manual_adj_${Date.now()}`,
+          date: date,
+          startTime: new Date(`${date}T09:00:00.000Z`),
+          endTime: new Date(`${date}T18:00:00.000Z`),
+          startAddress: 'Manual KM Credit (Admin Adjustment)',
+          endAddress: 'Manual KM Credit (Admin Adjustment)',
+          totalDistance: 0,
+          manualDistanceAdded: 0,
+          isActive: false,
+          coordinates: [],
+        });
+      }
+    }
+
+    if (!session) return res.status(404).json({ success: false, message: 'Tracking session or employee record not found' });
+
     if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN') {
       if (userOrgId && session.organizationId && userOrgId !== session.organizationId.toString()) {
         return res.status(403).json({ success: false, message: 'Access denied.' });
       }
     }
 
-    const added = Number(distanceToAdd);
-    session.totalDistance += added;
-    session.manualDistanceAdded = (session.manualDistanceAdded || 0) + added;
+    const previousDistance = Number(session.totalDistance) || 0;
+    let finalDistance = previousDistance;
+    let addedKm = 0;
+
+    if (mode === 'set' && newTotalDistance !== undefined) {
+      finalDistance = Math.max(0, Number(newTotalDistance));
+      addedKm = finalDistance - previousDistance;
+    } else {
+      addedKm = Number(distanceToAdd) || 0;
+      finalDistance = Math.max(0, previousDistance + addedKm);
+    }
+
+    session.totalDistance = Number(finalDistance.toFixed(2));
+    session.manualDistanceAdded = Number(((session.manualDistanceAdded || 0) + addedKm).toFixed(2));
+    if (reason) {
+      session.manualAdjustmentReason = reason;
+    }
     
     await session.save();
 
-    res.json({ success: true, message: `Successfully added ${added} km`, session });
+    // Also sync the total distance in Attendance for that employee & date
+    try {
+      const allDaySessions = await LiveLocation.find({
+        employee: session.employee,
+        date: session.date,
+      });
+      const dayTotalKm = allDaySessions.reduce((acc, s) => acc + (Number(s.totalDistance) || 0), 0);
+      
+      await Attendance.findOneAndUpdate(
+        { employee: session.employee, date: session.date },
+        { totalDistanceTraveled: Number(dayTotalKm.toFixed(2)) }
+      );
+    } catch (attErr) {
+      console.warn('Attendance distance sync warning:', attErr.message);
+    }
+
+    const populatedSession = await LiveLocation.findById(session._id).populate('employee', 'name email employeeId avatar department designation TA DA');
+
+    res.json({
+      success: true,
+      message: `Successfully adjusted distance to ${finalDistance.toFixed(2)} KM`,
+      session: populatedSession,
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
