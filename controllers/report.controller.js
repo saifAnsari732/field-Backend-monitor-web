@@ -13,31 +13,54 @@ exports.getConsolidatedReport = async (req, res) => {
     const startStr = start ? start.toISOString().slice(0, 10) : null;
     const endStr = end ? end.toISOString().slice(0, 10) : null;
 
+    // Build resilient date filters for various document schema field formats
+    const dateRangeFilter = start ? {
+      $or: [
+        { date: { $gte: start, $lte: end } },
+        { date: { $gte: startStr, $lte: endStr } },
+        { createdAt: { $gte: start, $lte: end } }
+      ]
+    } : {};
+
+    const stringDateFilter = startStr ? {
+      $or: [
+        { date: { $gte: startStr, $lte: endStr } },
+        { date: { $gte: start, $lte: end } },
+        { startTime: { $gte: start, $lte: end } },
+        { createdAt: { $gte: start, $lte: end } }
+      ]
+    } : {};
+
     const [employee, meetings, expenses, tasks, leads, locations, attendances] = await Promise.all([
       User.findById(employeeId).select('name employeeId department designation phone salary TA DA allocatedArea daHistory avatar email organizationId'),
       Meeting.find({ 
         employee: employeeId, 
-        ...(start && { date: { $gte: start, $lte: end } }) 
+        ...dateRangeFilter 
       }).sort({ date: -1, createdAt: -1 }),
       Expense.find({ 
         employee: employeeId, 
-        ...(start && { date: { $gte: start, $lte: end } }) 
+        ...dateRangeFilter 
       }).sort({ date: -1, createdAt: -1 }),
       Task.find({ 
         $or: [{ employee: employeeId }, { employeeId: employeeId }, { assignedTo: employeeId }], 
-        ...(start && { dueDate: { $gte: start, $lte: end } }) 
+        ...(start ? {
+          $or: [
+            { dueDate: { $gte: start, $lte: end } },
+            { createdAt: { $gte: start, $lte: end } }
+          ]
+        } : {}) 
       }).sort({ dueDate: -1, createdAt: -1 }),
       Lead.find({ 
         assignedTo: employeeId, 
-        ...(start && { createdAt: { $gte: start, $lte: end } }) 
+        ...(start ? { createdAt: { $gte: start, $lte: end } } : {}) 
       }).sort({ createdAt: -1 }),
       LiveLocation.find({ 
         employee: employeeId, 
-        ...(startStr && { date: { $gte: startStr, $lte: endStr || startStr } }) 
+        ...stringDateFilter 
       }).sort({ date: -1, startTime: -1 }),
       Attendance.find({
         employee: employeeId,
-        ...(startStr && { date: { $gte: startStr, $lte: endStr || startStr } })
+        ...stringDateFilter
       }).sort({ date: -1 })
     ]);
 

@@ -254,16 +254,22 @@ router.put('/:id/block', authenticate, resolveTenant, checkRole('ORG_ADMIN', 'AD
 
     await employee.save();
 
-    await AuditLog.create({
-      organizationId: req.organizationId,
-      userId: req.user._id,
-      userRole: req.user.role,
-      action: employee.isBlocked ? 'EMPLOYEE_BLOCKED' : 'EMPLOYEE_UNBLOCKED',
-      resource: 'Employee',
-      resourceId: employee._id,
-      details: { employeeName: employee.name, isBlocked: employee.isBlocked },
-      ipAddress: req.ip,
-    });
+    try {
+      await AuditLog.create({
+        organizationId: req.organizationId,
+        actorUserId: req.user._id,
+        userId: req.user._id,
+        userRole: req.user.role,
+        actorRole: req.user.role,
+        action: employee.isBlocked ? 'EMPLOYEE_BLOCKED' : 'EMPLOYEE_UNBLOCKED',
+        resource: 'Employee',
+        resourceId: employee._id,
+        details: { employeeName: employee.name, isBlocked: employee.isBlocked },
+        ipAddress: req.ip,
+      });
+    } catch (auditErr) {
+      console.warn('AuditLog creation warning on employee block:', auditErr.message);
+    }
 
     res.json({
       success: true,
@@ -320,28 +326,34 @@ router.delete('/:id', authenticate, resolveTenant, checkRole('ORG_ADMIN', 'ADMIN
     // 5. Delete the User record itself
     await User.findByIdAndDelete(empId);
 
-    // 6. Log in AuditLog
-    await AuditLog.create({
-      organizationId: req.organizationId,
-      userId: req.user._id,
-      userRole: req.user.role,
-      action: 'EMPLOYEE_DELETED',
-      resource: 'Employee',
-      resourceId: empId,
-      details: {
-        employeeName: employee.name,
-        employeeEmail: employee.email,
-        deletedRecords: {
-          trackingSessions: delLoc.deletedCount,
-          attendances: delAtt.deletedCount,
-          meetings: delMeet.deletedCount,
-          expenses: delExp.deletedCount,
-          tasks: delTasks.deletedCount,
-          leaves: delLeaves.deletedCount,
+    // 6. Log in AuditLog safely
+    try {
+      await AuditLog.create({
+        organizationId: req.organizationId,
+        actorUserId: req.user._id,
+        userId: req.user._id,
+        userRole: req.user.role,
+        actorRole: req.user.role,
+        action: 'EMPLOYEE_DELETED',
+        resource: 'Employee',
+        resourceId: empId,
+        details: {
+          employeeName: employee.name,
+          employeeEmail: employee.email,
+          deletedRecords: {
+            trackingSessions: delLoc.deletedCount,
+            attendances: delAtt.deletedCount,
+            meetings: delMeet.deletedCount,
+            expenses: delExp.deletedCount,
+            tasks: delTasks.deletedCount,
+            leaves: delLeaves.deletedCount,
+          },
         },
-      },
-      ipAddress: req.ip,
-    });
+        ipAddress: req.ip,
+      });
+    } catch (auditErr) {
+      console.warn('AuditLog creation warning on employee delete:', auditErr.message);
+    }
 
     res.json({
       success: true,

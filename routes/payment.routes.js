@@ -18,4 +18,7 @@ router.post('/verify-payment', paymentController.verifyPayment);
 // Get Organization Payment History
 router.get('/history', paymentController.getHistory);
 
+// Sync Latest Paid Payment & Activate Subscription
+router.all('/sync-latest', paymentController.syncLatestPayment);
+
 module.exports = router;

@@ -305,7 +305,7 @@ exports.createOrder = async (req, res) => {
 
     // 3. Record created transaction in Database
     const payment = new Payment({
-      organization: organizationId || null,
+      organization: targetOrgId || organizationId || null,
       user: req.user ? req.user._id : null,
       razorpayOrderId: order.id,
       amount: finalAmountINR,
@@ -410,9 +410,20 @@ exports.verifyPayment = async (req, res) => {
       );
     }
 
-    let targetOrgId = organizationId || (payment && payment.organization);
+    let targetOrgId = organizationId || (payment && payment.organization) || (payment && payment.notes && payment.notes.organizationId);
     if (!targetOrgId && req.user?.organizationId) {
       targetOrgId = req.user.organizationId;
+    }
+    if (!targetOrgId && payment?.user) {
+      const User = require('../models/User.model');
+      const u = await User.findById(payment.user);
+      if (u?.organizationId) targetOrgId = u.organizationId;
+    }
+    if (!targetOrgId && (payment?.notes?.userEmail || req.user?.email)) {
+      const User = require('../models/User.model');
+      const emailToFind = payment?.notes?.userEmail || req.user?.email;
+      const u = await User.findOne({ email: emailToFind });
+      if (u?.organizationId) targetOrgId = u.organizationId;
     }
 
     const isAddon = ['employee_addon', 'manager_addon', 'seat_addon', 'addon'].includes(plan);
@@ -568,6 +579,57 @@ exports.getHistory = async (req, res) => {
       success: true,
       count: payments.length,
       payments,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ⚡ 6. AUTO SYNC LATEST PAID SUBSCRIPTION FOR ORGANIZATION
+exports.syncLatestPayment = async (req, res) => {
+  try {
+    const orgId = req.organizationId || req.user?.organizationId || req.query.organizationId;
+    if (!orgId) return res.status(400).json({ success: false, message: 'Organization ID required' });
+
+    const latestPaidPayment = await Payment.findOne({
+      $or: [{ organization: orgId }, { 'notes.organizationId': String(orgId) }],
+      status: 'paid',
+    }).sort({ paidAt: -1, createdAt: -1 });
+
+    if (!latestPaidPayment) {
+      return res.json({ success: true, message: 'No recent paid payment records found.' });
+    }
+
+    const Plan = require('../models/Plan.model');
+    const planKey = latestPaidPayment.plan || 'pro';
+    const dbPlan = await Plan.findOne({
+      $or: [{ planId: planKey }, { name: { $regex: new RegExp(`^${planKey}`, 'i') } }],
+    });
+
+    const maxEmployees = dbPlan?.maxEmployees || (planKey === 'starter' ? 10 : planKey === 'enterprise' ? 50 : 30);
+    const maxManagers = dbPlan?.maxManagers || (planKey === 'starter' ? 3 : planKey === 'enterprise' ? 20 : 10);
+    const planTitle = dbPlan?.name || (planKey === 'starter' ? 'Starter Plan' : planKey === 'enterprise' ? 'Enterprise Plan' : 'Growth Pro Plan');
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + (latestPaidPayment.billingCycle === 'yearly' ? 365 : 30));
+
+    const updatedOrg = await Organization.findByIdAndUpdate(
+      orgId,
+      {
+        status: 'active',
+        'plan.planName': planTitle,
+        'plan.maxEmployees': maxEmployees,
+        'plan.maxManagers': maxManagers,
+        'plan.startsAt': latestPaidPayment.paidAt || new Date(),
+        'plan.expiresAt': expiresAt,
+      },
+      { new: true }
+    );
+
+    return res.json({
+      success: true,
+      message: `🎉 Successfully synced latest payment and activated ${planTitle}!`,
+      organization: updatedOrg,
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
