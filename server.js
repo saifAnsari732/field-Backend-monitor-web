@@ -294,6 +294,19 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
     } catch (err) {
       console.error('Failed to start no-movement cron:', err.message);
     }
+
+    // ── Auto-Stop Inactive Sessions Cron (non-overlapping, every 5 min) ──────
+    try {
+      const { autoStopInactiveSessions } = require('./controllers/tracking.controller');
+      setInterval(() => {
+        autoStopInactiveSessions(io).catch((e) =>
+          console.error('[cron] autoStop uncaught error:', e.message)
+        );
+      }, 5 * 60 * 1000);
+      console.log('⏰ Auto-stop inactive sessions cron started (5-min interval, 3h threshold).');
+    } catch (err) {
+      console.error('Failed to start auto-stop cron:', err.message);
+    }
   })
   .catch(err => console.error('❌ MongoDB error:', err));
 

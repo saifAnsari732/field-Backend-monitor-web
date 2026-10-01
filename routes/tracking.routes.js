@@ -8,6 +8,7 @@ const tc = require('../controllers/tracking.controller');
 router.post('/start', protect, requireActivePlan, tc.startTracking);
 router.post('/update', protect, requireActivePlan, tc.updateLocation);
 router.post('/stop', protect, tc.stopTracking);
+router.post('/heartbeat', protect, tc.heartbeat);
 
 // Get data
 router.get('/today', protect, tc.getTodaySessions);

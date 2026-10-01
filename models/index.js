@@ -7,27 +7,32 @@ const liveLocationSchema = new mongoose.Schema({
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   sessionId: { type: String, required: true },
   coordinates: [{
-    lat: Number,
-    lng: Number,
-    speed: Number,
-    accuracy: Number,
-    battery: Number,
-    address: String,
+    lat:       Number,
+    lng:       Number,
+    speed:     Number,
+    accuracy:  Number,
+    heading:   Number,
+    battery:   Number,
+    address:   String,
+    eventId:   String,           // Idempotency key — dedup on replay
+    isHeartbeat: Boolean,        // True if coord is a heartbeat ping (no distance added)
     timestamp: { type: Date, default: Date.now },
   }],
-  startTime: { type: Date, default: Date.now },
-  endTime: Date,
-  startAddress: String,
-  endAddress: String,
-  totalDistance: { type: Number, default: 0 }, // in km (Calculated with Haversine distance rules)
-  manualDistanceAdded: { type: Number, default: 0 }, // admin manually added km
-  isActive: { type: Boolean, default: true },
-  date: { type: String }, // YYYY-MM-DD
+  startTime:           { type: Date, default: Date.now },
+  endTime:             Date,
+  startAddress:        String,
+  endAddress:          String,
+  selfieUrl:           { type: String, default: null },  // Punch-in selfie photo
+  totalDistance:       { type: Number, default: 0 },     // km, written with $max (never decreases)
+  manualDistanceAdded: { type: Number, default: 0 },     // Admin KM credit
+  isActive:            { type: Boolean, default: true },
+  date:                { type: String },                  // YYYY-MM-DD
+  lastActivity:        { type: Date, default: Date.now }, // Updated by GPS updates & heartbeat
 }, { timestamps: true });
 
 liveLocationSchema.index({ organizationId: 1, employee: 1, date: -1 });
-liveLocationSchema.index({ organizationId: 1, isActive: 1 });
-liveLocationSchema.index({ sessionId: 1 });
+liveLocationSchema.index({ organizationId: 1, isActive: 1, lastActivity: 1 }); // For inactivity cron
+liveLocationSchema.index({ sessionId: 1 }, { unique: true });
 
 // ─── Meeting ──────────────────────────────────────────────────────────────────
 const meetingSchema = new mongoose.Schema({
