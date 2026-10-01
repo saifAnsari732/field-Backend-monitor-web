@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User.model');
 
-const HEARTBEAT_TIMEOUT = 60000; // 60 seconds
+const HEARTBEAT_TIMEOUT = 180000; // 180 seconds (3 minutes — prevents disconnect when browser tab is inactive)
 const heartbeatTimers = new Map(); // Track heartbeat timers per socket
 
 module.exports = (io) => {
@@ -151,11 +151,11 @@ module.exports = (io) => {
         ...data,
       };
 
-      // Real-time location broadcast to admins & organization room
-      io.to('admins').emit('employee_location', locationPayload);
+      // Real-time location broadcast strictly scoped to org room & superadmins
       if (orgId) {
-        io.to(`org:${orgId}`).emit('employee_location', locationPayload);
-        io.to(`org_${orgId}`).emit('employee_location', locationPayload);
+        io.to(`org_admins_${orgId}`).to(`org:${orgId}`).to(`org_${orgId}`).to('superadmins').emit('employee_location', locationPayload);
+      } else {
+        io.to('superadmins').emit('employee_location', locationPayload);
       }
     });
 
@@ -168,10 +168,10 @@ module.exports = (io) => {
         ...data,
       };
 
-      io.to('admins').emit('employee_tracking_started', startedPayload);
       if (orgId) {
-        io.to(`org:${orgId}`).emit('employee_tracking_started', startedPayload);
-        io.to(`org_${orgId}`).emit('employee_tracking_started', startedPayload);
+        io.to(`org_admins_${orgId}`).to(`org:${orgId}`).to(`org_${orgId}`).to('superadmins').emit('employee_tracking_started', startedPayload);
+      } else {
+        io.to('superadmins').emit('employee_tracking_started', startedPayload);
       }
     });
 
@@ -187,10 +187,10 @@ module.exports = (io) => {
         ...data,
       };
 
-      io.to('admins').emit('employee_tracking_stopped', stoppedPayload);
       if (orgId) {
-        io.to(`org:${orgId}`).emit('employee_tracking_stopped', stoppedPayload);
-        io.to(`org_${orgId}`).emit('employee_tracking_stopped', stoppedPayload);
+        io.to(`org_admins_${orgId}`).to(`org:${orgId}`).to(`org_${orgId}`).to('superadmins').emit('employee_tracking_stopped', stoppedPayload);
+      } else {
+        io.to('superadmins').emit('employee_tracking_stopped', stoppedPayload);
       }
     });
 
