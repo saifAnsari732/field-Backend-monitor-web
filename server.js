@@ -185,9 +185,9 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
       console.error('Failed to reset online status:', err.message);
     }
 
-    // ── No-Movement Cron (REST API tracking) ─────────────────────────────────
-    // Runs every 5 minutes. Checks if the distance between the employee's 
-    // current location and their location 5 minutes ago is less than 20 meters.
+    // ── No-Movement Cron (DISABLED by User Request) ─────────────────────────
+    // Stationary alerts have been disabled.
+    /*
     try {
       const User = require('./models/User.model');
       const { LiveLocation, Task, Notification } = require('./models/index');
@@ -210,7 +210,6 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
           const now   = Date.now();
           const today = new Date().toISOString().slice(0, 10);
 
-          // Find ALL active tracking sessions for today
           const activeSessions = await LiveLocation.find({
             isActive: true,
             date: today
@@ -224,8 +223,6 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
             if (!coords || coords.length === 0) continue;
 
             const latestCoord = coords[coords.length - 1];
-            
-            // Find a coordinate from at least 5 minutes ago
             const fiveMinsAgo = now - NO_MOVE_MS;
             let pastCoord = null;
             
@@ -237,25 +234,14 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
               }
             }
 
-            // If session started less than 5 mins ago, skip
             if (!pastCoord) continue;
-
-            // Check if they moved more than 20 meters in the last 5 minutes
             const dist = haversineMeters(pastCoord.lat, pastCoord.lng, latestCoord.lat, latestCoord.lng);
-            
-            if (dist >= MOVE_THRESHOLD) {
-              // They moved, so do NOT send an alert
-              continue;
-            }
-
-            // If we reach here, they have moved LESS than 20 meters in 5 minutes (STATIONARY)
-
+            if (dist >= MOVE_THRESHOLD) continue;
 
             const alertTitle = '⚠️ चेतावनी (Alert)';
             const alertMsg = 'आप पिछले 5 मिनट से एक ही जगह पर हैं। कृपया अपनी लोकेशन अपडेट करें या आगे बढ़ें।';
 
             try {
-              // Create notification in DB
               await Notification.create({
                 recipient: emp._id,
                 sender: emp._id,
@@ -264,18 +250,15 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
                 message: alertMsg
               });
 
-              // Emit 'alert' socket event
               io.to(`user_${emp._id}`).emit('alert', {
                 title: alertTitle,
                 message: alertMsg,
                 type: 'stationary'
               });
-
             } catch (dbErr) {
               console.error('Error creating alert notification:', dbErr.message);
             }
 
-            // Notify admins
             io.to('admins').emit('employee_stationary', {
               employeeId: emp._id,
               name: emp.name,
@@ -289,11 +272,10 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
           console.error('No-movement cron error:', cronErr.message);
         }
       }, CRON_INTERVAL);
-
-      console.log('⏰ No-movement cron started (5-min interval, All Employees).');
     } catch (err) {
       console.error('Failed to start no-movement cron:', err.message);
     }
+    */
 
     // ── Auto-Stop Inactive Sessions Cron (non-overlapping, every 5 min) ──────
     try {

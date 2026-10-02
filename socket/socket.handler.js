@@ -95,9 +95,8 @@ module.exports = (io) => {
     let stationaryAlertSent = false; // avoid spam
 
     function resetNoMoveTimer(lat, lng) {
-      if (noMoveTimer) clearTimeout(noMoveTimer);
-      stationaryAlertSent = false;
-      noMoveTimer = setTimeout(() => {
+      // Disabled by User Request
+      return;
         if (stationaryAlertSent) return;
         stationaryAlertSent = true;
         // Alert employee
