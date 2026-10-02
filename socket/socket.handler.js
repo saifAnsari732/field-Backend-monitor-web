@@ -95,34 +95,8 @@ module.exports = (io) => {
     let stationaryAlertSent = false; // avoid spam
 
     function resetNoMoveTimer(lat, lng) {
-      // Disabled by User Request
+      // Disabled by User Request (Stationary alerts turned off)
       return;
-        if (stationaryAlertSent) return;
-        stationaryAlertSent = true;
-        // Alert employee
-        socket.emit('alert', {
-          title: '⚠️ Movement Alert',
-          message: 'You have been stationary for 5 minutes. Please start moving or update your status.',
-          type: 'stationary'
-        });
-        // Alert admins
-        const alertData = {
-          employeeId: user._id,
-          name: user.name,
-          avatar: user.avatar,
-          department: user.department,
-          organizationId: orgId,
-          lat,
-          lng,
-          timestamp: Date.now(),
-          message: `${user.name} has been stationary for 5 minutes.`
-        };
-        io.to('admins').emit('employee_stationary', alertData);
-        if (orgId) {
-          io.to(`org:${orgId}`).emit('employee_stationary', alertData);
-        }
-        console.log(`⚠️ Stationary alert sent for ${user.name}`);
-      }, NO_MOVE_TIMEOUT);
     }
 
     // ─── Tracking Events ────────────────────────────────────────────────────────

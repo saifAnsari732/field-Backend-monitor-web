@@ -23,7 +23,7 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
-app.set('trust proxy', 1);
+app.set('trust proxy', 1); 
  
 // Universal CORS configuration (Allows Vercel, Localhost, Mobile apps, Custom domains)
 const corsOptions = {
