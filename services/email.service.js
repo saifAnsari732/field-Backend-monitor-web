@@ -1,21 +1,37 @@
 const nodemailer = require('nodemailer');
 
-// Create reusable transporter
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.SMTP_EMAIL || 'kisandeveloper2@gmail.com',
-      pass: process.env.SMTP_PASSWORD || process.env.EMAIL_PASS || 'vznfnjxreltcmpjp',
-    },
-  });
+// Create reusable transporter with optimized settings for Render
+let transporter = null;
+
+const getTransporter = () => {
+  if (!transporter) {
+    transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false, // STARTTLS
+      auth: {
+        user: process.env.SMTP_EMAIL || 'kisandeveloper2@gmail.com',
+        pass: process.env.SMTP_PASSWORD || process.env.EMAIL_PASS || 'vznfnjxreltcmpjp',
+      },
+      connectionTimeout: 10000, // 10s connection timeout
+      greetingTimeout: 10000,
+      socketTimeout: 15000, // 15s socket timeout
+      pool: true, // Use connection pooling
+      maxConnections: 3,
+      maxMessages: 50,
+      tls: {
+        rejectUnauthorized: false,
+      },
+    });
+  }
+  return transporter;
 };
 
 /**
- * Send OTP email for password reset
+ * Send OTP email for password reset (fire-and-forget safe)
  */
 exports.sendOtpEmail = async (toEmail, otpCode, userName) => {
-  const transporter = createTransporter();
+  const transport = getTransporter();
 
   const mailOptions = {
     from: `"KisanConnect Security" <${process.env.SMTP_EMAIL || 'kisandeveloper2@gmail.com'}>`,
@@ -50,5 +66,5 @@ exports.sendOtpEmail = async (toEmail, otpCode, userName) => {
     `,
   };
 
-  return transporter.sendMail(mailOptions);
+  return transport.sendMail(mailOptions);
 };
