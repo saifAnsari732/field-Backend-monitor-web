@@ -444,17 +444,13 @@ exports.forgotPassword = async (req, res) => {
     user.resetOtpExpires = otpExpires;
     await user.save({ validateModifiedOnly: true });
 
-    // Send OTP via email
-    try {
-      const { sendOtpEmail } = require('../services/email.service');
-      await sendOtpEmail(cleanEmail, otp, user.name);
-      console.log(`✅ OTP email sent to ${cleanEmail}`);
-    } catch (emailErr) {
-      console.error('❌ Email send failed:', emailErr.message);
-      // Still return success — don't leak info about email delivery
-    }
+    // Send OTP via email in background (non-blocking for fast UI response)
+    const { sendOtpEmail } = require('../services/email.service');
+    sendOtpEmail(cleanEmail, otp, user.name)
+      .then(() => console.log(`✅ OTP email sent to ${cleanEmail}`))
+      .catch((emailErr) => console.error('❌ Email send failed:', emailErr.message));
 
-    res.json({
+    return res.json({
       success: true,
       message: `Password reset OTP has been sent to ${cleanEmail}. Please check your inbox.`,
     });
