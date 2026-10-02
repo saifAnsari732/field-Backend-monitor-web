@@ -7,8 +7,8 @@ module.exports = (() => {
   r.post('/register', c.register);
   r.post('/register-organization', c.registerOrganization);
   r.post('/login', c.login);
-  r.post('/verify-reset-email', c.verifyResetEmail);
-  r.post('/reset-password-direct', c.resetPasswordDirect);
+  r.post('/forgot-password', c.forgotPassword);
+  r.post('/reset-password', c.resetPassword);
   r.post('/refresh-token', c.refreshToken);
   r.post('/logout', protect, c.logout);
   r.get('/me', protect, c.getMe);

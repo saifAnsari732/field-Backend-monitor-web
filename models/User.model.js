@@ -76,6 +76,8 @@ const userSchema = new mongoose.Schema(
       },
     ],
     allocatedArea: { type: String, default: "Default Area" },
+    resetOtp: { type: String, select: false },
+    resetOtpExpires: { type: Date, select: false },
   },
   { timestamps: true }
 );

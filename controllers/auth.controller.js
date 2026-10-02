@@ -419,88 +419,102 @@ exports.registerOrganization = async (req, res) => {
   }
 };
 
-// @desc Verify email or phone exists for password reset (Public)
-exports.verifyResetEmail = async (req, res) => {
+// @desc Forgot Password — Generate OTP and send via email
+exports.forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ success: false, message: 'Email address or phone is required.' });
+    if (!email) return res.status(400).json({ success: false, message: 'Email is required.' });
 
-    const rawInput = String(email).trim();
-    const cleanEmail = rawInput.toLowerCase();
-    const digitsOnly = rawInput.replace(/\D/g, '');
-
-    const queryConditions = [
-      { email: cleanEmail },
-      { phone: rawInput },
-      { phone: cleanEmail }
-    ];
-    if (digitsOnly.length >= 7) {
-      queryConditions.push({ phone: new RegExp(digitsOnly.slice(-10) + '$') });
-    }
-
-    const user = await User.findOne({ $or: queryConditions });
+    const cleanEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: cleanEmail });
 
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No account found with this email address or phone number.' 
-      });
+      return res.status(404).json({ success: false, message: 'No account found with this email address.' });
+    }
+
+    // Generate secure 6-digit OTP
+    const crypto = require('crypto');
+    const otp = crypto.randomInt(100000, 999999).toString();
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Save OTP to user (hashed for security)
+    const bcrypt = require('bcryptjs');
+    const salt = await bcrypt.genSalt(10);
+    user.resetOtp = await bcrypt.hash(otp, salt);
+    user.resetOtpExpires = otpExpires;
+    await user.save({ validateModifiedOnly: true });
+
+    // Send OTP via email
+    try {
+      const { sendOtpEmail } = require('../services/email.service');
+      await sendOtpEmail(cleanEmail, otp, user.name);
+      console.log(`✅ OTP email sent to ${cleanEmail}`);
+    } catch (emailErr) {
+      console.error('❌ Email send failed:', emailErr.message);
+      // Still return success — don't leak info about email delivery
     }
 
     res.json({
       success: true,
-      message: 'Account verified successfully.',
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone
-      }
+      message: `Password reset OTP has been sent to ${cleanEmail}. Please check your inbox.`,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error('forgotPassword error:', err);
+    res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }
 };
 
-// @desc Direct reset password without OTP (Public - Email or Phone Verified)
-exports.resetPasswordDirect = async (req, res) => {
+// @desc Reset Password — Verify OTP and update password
+exports.resetPassword = async (req, res) => {
   try {
-    const { email, newPassword } = req.body;
-    if (!email || !newPassword) {
-      return res.status(400).json({ success: false, message: 'Email or phone and new password are required.' });
+    const { email, otp, newPassword } = req.body;
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({ success: false, message: 'Email, OTP, and new password are required.' });
     }
     if (newPassword.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters long.' });
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
     }
 
-    const rawInput = String(email).trim();
-    const cleanEmail = rawInput.toLowerCase();
-    const digitsOnly = rawInput.replace(/\D/g, '');
-
-    const queryConditions = [
-      { email: cleanEmail },
-      { phone: rawInput },
-      { phone: cleanEmail }
-    ];
-    if (digitsOnly.length >= 7) {
-      queryConditions.push({ phone: new RegExp(digitsOnly.slice(-10) + '$') });
-    }
-
-    const user = await User.findOne({ $or: queryConditions });
+    const cleanEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: cleanEmail }).select('+resetOtp +resetOtpExpires');
 
     if (!user) {
-      return res.status(404).json({ success: false, message: 'User account not found.' });
+      return res.status(404).json({ success: false, message: 'User not found.' });
     }
 
+    // Check OTP exists and not expired
+    if (!user.resetOtp || !user.resetOtpExpires) {
+      return res.status(400).json({ success: false, message: 'No OTP request found. Please request a new one.' });
+    }
+
+    if (new Date() > user.resetOtpExpires) {
+      // Clear expired OTP
+      user.resetOtp = undefined;
+      user.resetOtpExpires = undefined;
+      await user.save({ validateModifiedOnly: true });
+      return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
+    }
+
+    // Verify OTP (compare with hashed value)
+    const bcrypt = require('bcryptjs');
+    const isOtpValid = await bcrypt.compare(String(otp).trim(), user.resetOtp);
+    if (!isOtpValid) {
+      return res.status(400).json({ success: false, message: 'Invalid OTP code. Please check and try again.' });
+    }
+
+    // Update password and clear OTP fields
     user.password = newPassword;
-    await user.save(); // pre('save') hook hashes the password with bcrypt!
+    user.resetOtp = undefined;
+    user.resetOtpExpires = undefined;
+    await user.save(); // pre('save') hook will hash the password
 
     res.json({
       success: true,
-      message: 'Password updated successfully! You can now log in with your new password.'
+      message: 'Password updated successfully! You can now sign in with your new password.',
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error('resetPassword error:', err);
+    res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }
 };
 
