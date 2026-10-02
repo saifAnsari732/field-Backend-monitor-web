@@ -25,7 +25,7 @@ const app = express();
 const server = http.createServer(app);
 app.set('trust proxy', 1); 
  
-// Universal CORS configuration (Allows Vercel, Localhost, Mobile apps, Custom domains)
+// Universal CORS  configuration (Allows Vercel, Localhost, Mobile apps, Custom domains)
 const corsOptions = {
   origin: (origin, callback) => {
     // Dynamically reflect origin to allow credentials with any origin (Vercel, Localhost, Custom Domains)
