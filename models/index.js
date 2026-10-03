@@ -24,7 +24,9 @@ const liveLocationSchema = new mongoose.Schema({
   endAddress:          String,
   selfieUrl:           { type: String, default: null },  // Punch-in selfie photo
   totalDistance:       { type: Number, default: 0 },     // km, written with $max (never decreases)
+  officialDistance:    { type: Number, default: 0 },     // Authoritative distance
   manualDistanceAdded: { type: Number, default: 0 },     // Admin KM credit
+  manualAdjustmentReason: { type: String, default: null }, // Audit note for adjustment
   isActive:            { type: Boolean, default: true },
   date:                { type: String },                  // YYYY-MM-DD
   lastActivity:        { type: Date, default: Date.now }, // Updated by GPS updates & heartbeat

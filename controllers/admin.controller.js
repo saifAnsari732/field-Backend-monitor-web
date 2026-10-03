@@ -480,8 +480,15 @@ exports.adjustTrackingDistance = async (req, res) => {
     const userRole = (req.user?.role || '').toUpperCase();
     const userOrgId = req.user?.organizationId?._id?.toString() || req.user?.organizationId?.toString();
 
+    // 1. Flexible session locator (supports Mongo _id or custom sessionId string)
     if (sessionId) {
-      session = await LiveLocation.findById(sessionId);
+      const mongoose = require('mongoose');
+      if (mongoose.Types.ObjectId.isValid(sessionId)) {
+        session = await LiveLocation.findById(sessionId);
+      }
+      if (!session) {
+        session = await LiveLocation.findOne({ sessionId: sessionId });
+      }
     } else if (employeeId && date) {
       session = await LiveLocation.findOne({ employee: employeeId, date: date }).sort({ createdAt: -1 });
       if (!session) {
@@ -499,6 +506,7 @@ exports.adjustTrackingDistance = async (req, res) => {
           startAddress: 'Manual KM Credit (Admin Adjustment)',
           endAddress: 'Manual KM Credit (Admin Adjustment)',
           totalDistance: 0,
+          officialDistance: 0,
           manualDistanceAdded: 0,
           isActive: false,
           coordinates: [],
@@ -508,33 +516,51 @@ exports.adjustTrackingDistance = async (req, res) => {
 
     if (!session) return res.status(404).json({ success: false, message: 'Tracking session or employee record not found' });
 
+    // Multi-tenant authorization check
     if (userRole !== 'SUPER_ADMIN' && userRole !== 'SUPERADMIN') {
       if (userOrgId && session.organizationId && userOrgId !== session.organizationId.toString()) {
         return res.status(403).json({ success: false, message: 'Access denied.' });
       }
     }
 
+    // 2. Strict Mathematical Bounds & Sanity Validation
     const previousDistance = Number(session.totalDistance) || 0;
     let finalDistance = previousDistance;
     let addedKm = 0;
 
-    if (mode === 'set' && newTotalDistance !== undefined) {
-      finalDistance = Math.max(0, Number(newTotalDistance));
+    if (mode === 'set') {
+      const parsedSet = Number(newTotalDistance);
+      if (!Number.isFinite(parsedSet) || parsedSet < 0) {
+        return res.status(400).json({ success: false, message: 'Please enter a valid non-negative KM value.' });
+      }
+      if (parsedSet > 1000) {
+        return res.status(400).json({ success: false, message: 'Total distance cannot exceed 1,000 KM per shift.' });
+      }
+      finalDistance = parsedSet;
       addedKm = finalDistance - previousDistance;
     } else {
-      addedKm = Number(distanceToAdd) || 0;
+      const parsedAdd = Number(distanceToAdd);
+      if (!Number.isFinite(parsedAdd) || parsedAdd < 0) {
+        return res.status(400).json({ success: false, message: 'Please enter a valid KM number to add.' });
+      }
+      if (parsedAdd > 500) {
+        return res.status(400).json({ success: false, message: 'Cannot add more than 500 KM in a single adjustment.' });
+      }
+      addedKm = parsedAdd;
       finalDistance = Math.max(0, previousDistance + addedKm);
+      if (finalDistance > 1000) {
+        return res.status(400).json({ success: false, message: 'Total accumulated distance exceeds safety limit (1,000 KM).' });
+      }
     }
 
     session.totalDistance = Number(finalDistance.toFixed(2));
+    session.officialDistance = Number(finalDistance.toFixed(2));
     session.manualDistanceAdded = Number(((session.manualDistanceAdded || 0) + addedKm).toFixed(2));
-    if (reason) {
-      session.manualAdjustmentReason = reason;
-    }
+    session.manualAdjustmentReason = reason || 'Admin manual KM adjustment';
     
     await session.save();
 
-    // Also sync the total distance in Attendance for that employee & date
+    // 3. Reconcile Attendance day total
     try {
       const allDaySessions = await LiveLocation.find({
         employee: session.employee,
@@ -544,11 +570,58 @@ exports.adjustTrackingDistance = async (req, res) => {
       
       await Attendance.findOneAndUpdate(
         { employee: session.employee, date: session.date },
-        { totalDistanceTraveled: Number(dayTotalKm.toFixed(2)) }
+        { $set: { totalDistanceTraveled: Number(dayTotalKm.toFixed(2)) } }
       );
     } catch (attErr) {
       console.warn('Attendance distance sync warning:', attErr.message);
     }
+
+    // 4. Audit Log for Full Regulatory Compliance & Anti-Fraud Traceability
+    try {
+      const AuditLog = require('../models/AuditLog.model');
+      await AuditLog.create({
+        organizationId: session.organizationId,
+        actorUserId: req.user?._id,
+        actorName: req.user?.name || req.user?.email || 'Admin',
+        actorRole: userRole,
+        action: 'ADJUST_DISTANCE',
+        targetType: 'LiveLocation',
+        targetId: session._id.toString(),
+        resource: 'tracking',
+        details: {
+          employeeId: session.employee,
+          sessionId: session.sessionId,
+          date: session.date,
+          previousDistance,
+          finalDistance,
+          addedKm,
+          mode,
+          reason: session.manualAdjustmentReason,
+        },
+      });
+    } catch (logErr) {
+      console.warn('AuditLog creation warning:', logErr.message);
+    }
+
+    // 5. Real-Time Socket Broadcast to Monitor Web & Mobile App
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.to('admins').emit('distance_adjusted', {
+          sessionId: session.sessionId,
+          employeeId: session.employee,
+          totalDistance: session.totalDistance,
+          manualDistanceAdded: session.manualDistanceAdded,
+          date: session.date,
+        });
+        io.to(`emp_${session.employee}`).emit('distance_adjusted', {
+          sessionId: session.sessionId,
+          totalDistance: session.totalDistance,
+          manualDistanceAdded: session.manualDistanceAdded,
+          date: session.date,
+        });
+      }
+    } catch (_) {}
 
     const populatedSession = await LiveLocation.findById(session._id).populate('employee', 'name email employeeId avatar department designation TA DA');
 
