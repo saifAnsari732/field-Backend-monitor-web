@@ -594,7 +594,7 @@ exports.deleteEmployeeHistory = async (req, res) => {
 };
 
 // ─── AUTO-STOP INACTIVE SESSIONS (non-overlapping cron helper) ───────────────
-const INACTIVITY_HOURS = 3; // close session after 3h no GPS update
+const INACTIVITY_HOURS = 14; // full workday: a stationary employee (home/office) must NOT be closed after 3h
 exports.autoStopInactiveSessions = async (io) => {
   if (_cronRunning) {
     console.warn('[cron] autoStopInactiveSessions: skipping — previous run still active.');
@@ -633,6 +633,7 @@ exports.autoStopInactiveSessions = async (io) => {
       try {
         await LiveLocation.findByIdAndUpdate(s._id, {
           isActive: false,
+          autoClosed: true,
           endTime: new Date(),
         });
 

@@ -285,7 +285,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
           console.error('[cron] autoStop uncaught error:', e.message)
         );
       }, 5 * 60 * 1000);
-      console.log('⏰ Auto-stop inactive sessions cron started (5-min interval, 3h threshold).');
+      console.log('⏰ Auto-stop inactive sessions cron started (5-min interval, 14h threshold).');
     } catch (err) {
       console.error('Failed to start auto-stop cron:', err.message);
     }

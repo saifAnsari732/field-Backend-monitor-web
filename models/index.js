@@ -28,6 +28,7 @@ const liveLocationSchema = new mongoose.Schema({
   manualDistanceAdded: { type: Number, default: 0 },     // Admin KM credit
   manualAdjustmentReason: { type: String, default: null }, // Audit note for adjustment
   isActive:            { type: Boolean, default: true },
+  autoClosed:          { type: Boolean, default: false }, // true = closed by inactivity cron (resumable)
   date:                { type: String },                  // YYYY-MM-DD
   lastActivity:        { type: Date, default: Date.now }, // Updated by GPS updates & heartbeat
 }, { timestamps: true });
