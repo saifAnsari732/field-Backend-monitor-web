@@ -35,6 +35,7 @@ const userSchema = new mongoose.Schema(
     manager: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     managerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     managerName: { type: String, default: "" },
+    managers: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     assignedEmployees: [
       {
         _id: { type: mongoose.Schema.Types.ObjectId, ref: "User" },

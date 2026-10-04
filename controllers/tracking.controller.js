@@ -429,7 +429,14 @@ exports.getLiveEmployees = async (req, res) => {
     if (role !== 'SUPER_ADMIN' && role !== 'SUPERADMIN' && orgObjId) {
       userFilter.organizationId = orgObjId;
       if (role === 'MANAGER') {
-        userFilter.$or = [{ manager: req.user._id }, { managerId: req.user._id }];
+        const mgrUser = await User.findById(req.user._id).select('assignedEmployees');
+        const assignedEmpIds = (mgrUser?.assignedEmployees || []).map((e) => e._id || e);
+        userFilter.$or = [
+          { manager: req.user._id },
+          { managerId: req.user._id },
+          { managers: req.user._id },
+          { _id: { $in: assignedEmpIds } },
+        ];
       }
     }
 
@@ -470,7 +477,14 @@ exports.getLiveLocations = async (req, res) => {
     if (role !== 'SUPER_ADMIN' && role !== 'SUPERADMIN' && orgObjId) {
       userFilter.organizationId = orgObjId;
       if (role === 'MANAGER') {
-        userFilter.$or = [{ manager: req.user._id }, { managerId: req.user._id }];
+        const mgrUser = await User.findById(req.user._id).select('assignedEmployees');
+        const assignedEmpIds = (mgrUser?.assignedEmployees || []).map((e) => e._id || e);
+        userFilter.$or = [
+          { manager: req.user._id },
+          { managerId: req.user._id },
+          { managers: req.user._id },
+          { _id: { $in: assignedEmpIds } },
+        ];
       }
     }
 

@@ -82,7 +82,12 @@ exports.getAllEmployees = async (req, res) => {
     if (search) filter.$or = [{ name: { $regex: search, $options: 'i' } }, { email: { $regex: search, $options: 'i' } }, { employeeId: { $regex: search, $options: 'i' } }];
     if (department) filter.department = department;
     if (isActive !== undefined) filter.isActive = isActive === 'true';
-    const employees = await User.find(filter).populate('manager', 'name').sort({ isTracking: -1, isOnline: -1, createdAt: -1 }).skip((page - 1) * limit).limit(+limit);
+    const employees = await User.find(filter)
+      .populate('manager', 'name email department')
+      .populate('managers', 'name email department')
+      .sort({ isTracking: -1, isOnline: -1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(+limit);
     const total = await User.countDocuments(filter);
     res.json({ success: true, employees, total, pages: Math.ceil(total / limit) });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
@@ -156,7 +161,19 @@ exports.updateEmployee = async (req, res) => {
       }
     }
 
-    const employee = await User.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    // Secure Password Hashing on Update
+    if (updateData.password && String(updateData.password).trim() !== '') {
+      const bcrypt = require('bcryptjs');
+      const salt = await bcrypt.genSalt(12);
+      updateData.password = await bcrypt.hash(String(updateData.password), salt);
+    } else {
+      delete updateData.password;
+    }
+
+    const employee = await User.findByIdAndUpdate(req.params.id, updateData, { new: true })
+      .select('-password')
+      .populate('manager', 'name email department')
+      .populate('managers', 'name email department');
 
     // Handle Manager Assignment Logic
     if (req.body.manager && (!oldEmployee.manager || oldEmployee.manager.toString() !== req.body.manager.toString())) {
@@ -168,22 +185,9 @@ exports.updateEmployee = async (req, res) => {
           }
         }
       });
-
-      if (oldEmployee.manager) {
-        await User.findByIdAndUpdate(oldEmployee.manager, {
-          $pull: {
-            assignedEmployees: { _id: employee._id }
-          }
-        });
-      }
-    } else if (req.body.manager === null || req.body.manager === "") {
-      if (oldEmployee.manager) {
-        await User.findByIdAndUpdate(oldEmployee.manager, {
-          $pull: {
-            assignedEmployees: { _id: employee._id }
-          }
-        });
-      }
+      await User.findByIdAndUpdate(employee._id, {
+        $addToSet: { managers: req.body.manager }
+      });
     }
 
     res.json({ success: true, employee });
@@ -197,13 +201,19 @@ exports.getManagers = async (req, res) => {
       .select('-password')
       .lean();
 
-    // Populate assigned employees dynamically from User model
+    // Populate assigned employees dynamically from User model (supports Multi-Manager)
     const managersWithEmps = await Promise.all(
       managers.map(async (mgr) => {
+        const directEmps = (mgr.assignedEmployees || []).map((e) => e._id || e);
         const assigned = await User.find({
           ...orgFilter,
-          $or: [{ manager: mgr._id }, { managerId: mgr._id }],
-        }).select('_id name email phone employeeId department designation isActive isOnline isTracking');
+          $or: [
+            { manager: mgr._id },
+            { managerId: mgr._id },
+            { managers: mgr._id },
+            { _id: { $in: directEmps } },
+          ],
+        }).select('_id name email phone employeeId department designation isActive isOnline isTracking avatar');
 
         return {
           ...mgr,

@@ -29,16 +29,32 @@ router.get('/', authenticate, resolveTenant, async (req, res) => {
     // Always exclude Super Admin accounts from regular employee lists
     query.role = { $nin: ['SUPER_ADMIN', 'super_admin', 'SUPERADMIN', 'superadmin'] };
 
-    // Role-based scope restriction
+    // Role-based scope restriction (Supports Multi-Manager)
     const isManager = ['MANAGER', 'manager'].includes(req.user.role);
     if (isManager) {
-      query.$or = [{ manager: req.user._id }, { managerId: req.user._id }];
+      const mgrUser = await User.findById(req.user._id).select('assignedEmployees');
+      const assignedEmpIds = (mgrUser?.assignedEmployees || []).map((e) => e._id || e);
+      query.$or = [
+        { manager: req.user._id },
+        { managerId: req.user._id },
+        { managers: req.user._id },
+        { _id: { $in: assignedEmpIds } },
+      ];
     }
 
     // Filters
     if (req.query.role) query.role = { $regex: new RegExp(`^${req.query.role}$`, 'i'), $nin: ['SUPER_ADMIN', 'super_admin', 'SUPERADMIN', 'superadmin'] };
     if (req.query.department) query.department = req.query.department;
-    if (req.query.managerId) query.$or = [{ manager: req.query.managerId }, { managerId: req.query.managerId }];
+    if (req.query.managerId) {
+      const targetMgr = await User.findById(req.query.managerId).select('assignedEmployees');
+      const targetAssignedIds = (targetMgr?.assignedEmployees || []).map((e) => e._id || e);
+      query.$or = [
+        { manager: req.query.managerId },
+        { managerId: req.query.managerId },
+        { managers: req.query.managerId },
+        { _id: { $in: targetAssignedIds } },
+      ];
+    }
     if (req.query.status) query.isActive = req.query.status === 'active';
     if (req.query.search) {
       query.$and = [
@@ -55,8 +71,9 @@ router.get('/', authenticate, resolveTenant, async (req, res) => {
 
     const employees = await User.find(query)
       .select('-password')
-      .populate('manager', 'name email phone')
-      .populate('managerId', 'name email phone')
+      .populate('manager', 'name email phone department')
+      .populate('managerId', 'name email phone department')
+      .populate('managers', 'name email phone department')
       .sort({ createdAt: -1 });
 
     res.json({ success: true, count: employees.length, employees });
@@ -71,7 +88,8 @@ router.get('/:id', authenticate, resolveTenant, async (req, res) => {
     const employee = await User.findById(req.params.id)
       .select('-password')
       .populate('manager', 'name email phone department')
-      .populate('managerId', 'name email phone department');
+      .populate('managerId', 'name email phone department')
+      .populate('managers', 'name email phone department');
 
     if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
 
@@ -133,6 +151,7 @@ router.post('/', authenticate, resolveTenant, checkRole('ORG_ADMIN', 'ADMIN', 'H
       designation: designation || 'Field Staff',
       manager: managerId || null,
       managerId: managerId || null,
+      managers: managerId ? [managerId] : [],
       salary: salary || 12000,
       TA: TA || 2.5,
       DA: DA || 0,
@@ -166,30 +185,36 @@ router.put('/:id', authenticate, resolveTenant, checkRole('ORG_ADMIN', 'ADMIN', 
       return res.status(403).json({ success: false, message: 'Access denied.' });
     }
 
-    const newManagerId = req.body.managerId || req.body.manager;
-    if (newManagerId !== undefined) {
-      req.body.manager = newManagerId || null;
-      req.body.managerId = newManagerId || null;
+    const updateData = { ...req.body };
+    delete updateData.organizationId;
+
+    // Secure Password Hashing on Update
+    if (updateData.password && String(updateData.password).trim() !== '') {
+      const bcrypt = require('bcryptjs');
+      const salt = await bcrypt.genSalt(12);
+      updateData.password = await bcrypt.hash(String(updateData.password), salt);
+    } else {
+      delete updateData.password;
     }
 
-    const updatedEmployee = await User.findByIdAndUpdate(req.params.id, req.body, { new: true }).select('-password');
+    const newManagerId = updateData.managerId || updateData.manager;
+    if (newManagerId !== undefined) {
+      updateData.manager = newManagerId || null;
+      updateData.managerId = newManagerId || null;
+    }
 
-    // Handle Manager Assignment/Removal
-    if (newManagerId && (!oldEmployee.manager || String(oldEmployee.manager) !== String(newManagerId))) {
+    const updatedEmployee = await User.findByIdAndUpdate(req.params.id, updateData, { new: true })
+      .select('-password')
+      .populate('manager', 'name email phone department')
+      .populate('managers', 'name email phone department');
+
+    if (newManagerId) {
       await User.findByIdAndUpdate(newManagerId, {
         $addToSet: { assignedEmployees: { _id: updatedEmployee._id, name: updatedEmployee.name } },
       });
-      if (oldEmployee.manager) {
-        await User.findByIdAndUpdate(oldEmployee.manager, {
-          $pull: { assignedEmployees: { _id: updatedEmployee._id } },
-        });
-      }
-    } else if (newManagerId === null || newManagerId === '') {
-      if (oldEmployee.manager) {
-        await User.findByIdAndUpdate(oldEmployee.manager, {
-          $pull: { assignedEmployees: { _id: updatedEmployee._id } },
-        });
-      }
+      await User.findByIdAndUpdate(updatedEmployee._id, {
+        $addToSet: { managers: newManagerId },
+      });
     }
 
     res.json({ success: true, message: 'Employee updated successfully!', employee: updatedEmployee });
@@ -210,10 +235,13 @@ router.post('/assign-manager', authenticate, resolveTenant, checkRole('ORG_ADMIN
     const manager = await User.findById(managerId);
     if (!manager) return res.status(404).json({ success: false, message: 'Manager not found.' });
 
-    // Update employees
+    // Update employees (Multi-manager safe)
     await User.updateMany(
       { _id: { $in: employeeIds }, organizationId: req.organizationId },
-      { manager: managerId, managerId: managerId, managerName: manager.name }
+      {
+        $addToSet: { managers: managerId },
+        $set: { manager: managerId, managerId: managerId, managerName: manager.name }
+      }
     );
 
     // Update manager's assignedEmployees list

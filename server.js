@@ -159,7 +159,7 @@ app.get('/api/dashboard/stats', dashboardStatsHandler);
 app.get('/dashboard/stats', dashboardStatsHandler);
 
 // Health check
-app.get('/api/health', (req, res) => res.json({ status: 'OK', timestamp: new Date() }));
+app.get('/api/health', (req, res) => res.json({ status: 'OK aws', timestamp: new Date() }));
 app.get('/health', (req, res) => res.json({ status: 'OK', timestamp: new Date() }));
 
 // Telegram bot bootstrap
