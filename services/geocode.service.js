@@ -55,9 +55,16 @@ const formatAddress = (result) => {
 };
 
 const reverseGeocode = async (lat, lng) => {
-  const cacheKey = `geo:${parseFloat(lat).toFixed(5)},${parseFloat(lng).toFixed(5)}`;
+  const numLat = Number(lat);
+  const numLng = Number(lng);
+  if (!Number.isFinite(numLat) || !Number.isFinite(numLng) || numLat < -90 || numLat > 90 || numLng < -180 || numLng > 180) {
+    return '';
+  }
+
+  // 3 decimal places (~110m resolution) is ideal for address geocoding and maximizes cache hits
+  const cacheKey = `geo:${numLat.toFixed(3)},${numLng.toFixed(3)}`;
   
-  const cachedValue = geocodeCache.get(cacheKey);
+  const cachedValue = await geocodeCache.get(cacheKey);
   if (cachedValue) return cachedValue;
 
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
@@ -68,9 +75,6 @@ const reverseGeocode = async (lat, lng) => {
 
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${cleanLat},${cleanLng}&key=${apiKey}&language=en`;
-    
-    // Log the request for debugging (mask the key)
-    console.log(`🌐 Geocoding Request: ${url.replace(apiKey, 'AIza...XXXX')}`);
 
     const response = await fetch(url);
     const data = await response.json();
@@ -83,8 +87,6 @@ const reverseGeocode = async (lat, lng) => {
     }
 
     if (data.results && data.results.length > 0) {
-      console.log('📡 Google returned', data.results.length, 'results');
-      
       // Aggressively prioritize the most specific landmarks/buildings
       const bestResult = data.results.sort((a, b) => {
         const getScore = (res) => {
@@ -112,8 +114,7 @@ const reverseGeocode = async (lat, lng) => {
       })[0];
 
       const result = formatAddress(bestResult);
-      console.log('🎯 SELECTED BEST (Formatted):', result);
-      geocodeCache.set(cacheKey, result);
+      await geocodeCache.set(cacheKey, result);
       return result;
     }
 
@@ -134,7 +135,7 @@ const fallbackNominatim = async (lat, lng, cacheKey) => {
     });
     const data = await response.json();
     const result = data.display_name || `Location (${parseFloat(lat).toFixed(4)}, ${parseFloat(lng).toFixed(4)})`;
-    if (data.display_name) geocodeCache.set(cacheKey, result);
+    if (data.display_name) await geocodeCache.set(cacheKey, result);
     return result;
   } catch (err) {
     return `Location (${parseFloat(lat).toFixed(4)}, ${parseFloat(lng).toFixed(4)})`;

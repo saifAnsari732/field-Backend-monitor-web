@@ -115,25 +115,35 @@ exports.getTeamTrackingHistory = async (req, res) => {
     const teamMembers = await User.find({ manager: req.user._id }).select('_id');
     const teamIds = teamMembers.map(emp => emp._id);
     const filter = { employee: { $in: teamIds } };
-    if (date) filter.date = date;
+    if (date) {
+      filter.$or = [{ date }, { isActive: true }];
+    }
     if (employeeId) filter.employee = employeeId;
 
     const history = await LiveLocation.find(filter)
       .populate('employee', 'name employeeId department designation avatar')
-      .sort({ createdAt: -1 })
+      .sort({ isActive: -1, updatedAt: -1 })
       .skip((page - 1) * limit)
       .limit(+limit);
 
+    const { DistanceLedger } = require('../models/index');
+    const sanitizedHistory = await Promise.all((history || []).map(async (doc) => {
+      const s = doc.toObject ? doc.toObject() : { ...doc };
+      const ledgerAgg = await DistanceLedger.aggregate([
+        { $match: { sessionId: s.sessionId, classification: 'ACCEPTED' } },
+        { $group: { _id: null, totalKm: { $sum: '$distanceKm' } } }
+      ]);
+      if (ledgerAgg && ledgerAgg.length > 0 && typeof ledgerAgg[0].totalKm === 'number' && ledgerAgg[0].totalKm > 0) {
+        const verifiedKm = Math.round(ledgerAgg[0].totalKm * 100) / 100;
+        s.totalDistance = verifiedKm;
+        s.officialDistance = verifiedKm;
+      }
+      return s;
+    }));
+
     const total = await LiveLocation.countDocuments(filter);
 
-    // Per-employee summary for the day
-    const summaryPipeline = [
-      { $match: filter },
-      { $group: { _id: '$employee', totalKm: { $sum: '$totalDistance' }, sessions: { $sum: 1 } } }
-    ];
-    const summary = await LiveLocation.aggregate(summaryPipeline);
-
-    res.json({ success: true, history, total, pages: Math.ceil(total / limit), summary });
+    res.json({ success: true, history: sanitizedHistory, total, pages: Math.ceil(total / limit) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

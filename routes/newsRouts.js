@@ -32,40 +32,29 @@ router.get('/news', async (req, res) => {
 });
 
 // C. SAVE NEWS AS DRAFT (फॉर्म सबमिट करने पर पहले डेटाबेस में ड्राफ्ट सेव होगा)
-router.post('/news/create', async (req, res) => {
-   try {
-    console.log("Received Data:", req.body);
+router.post('/news', async (req, res) => {
+  try {
+    const { title, description, content, category, image, videoUrl, author, date } = req.body;
 
-   const news = await News.create({
-  newsTitle: req.body.newsTitle,
-  content: req.body.content,
-  category: req.body.category,
-  reporterName: req.body.reporterName,
-  state: req.body.state,
-  city: req.body.city,
-  tags: req.body.tags,
-  featuredImage: req.body.featuredImage,
-  sourceLink: req.body.sourceLink,
+    const newArticle = new News({
+      title,
+      description,
+      content,
+      category,
+      image,
+      videoUrl,
+      author,
+      date,
+      published: false // पब्लिश बटन दबाने से पहले ड्राफ्ट रहेगा
+    });
 
-  keywords: req.body.keywords,
-
-  published: req.body.published,
-  date: req.body.date
-});
-
+    const savedArticle = await newArticle.save();
     res.status(201).json({
-      success: true,
-      message: "News Saved Successfully",
-      data: news
+      message: "News saved successfully to DB as draft!",
+      article: savedArticle
     });
-
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to save news draft", details: err.message });
   }
 });
 

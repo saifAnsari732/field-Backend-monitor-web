@@ -763,20 +763,20 @@ exports.getSystemHealth = async (req, res) => {
       console.warn('Could not fetch raw db.stats():', statErr.message);
     }
 
-    // 3. Detailed Collection Breakdown
+    // 3. Detailed Collection Breakdown (Real MongoDB Collection Stats)
     const collectionModels = [
-      { key: 'organizations', model: Organization, displayName: 'Organizations', category: 'Tenancy' },
-      { key: 'users', model: User, displayName: 'Users & Staff', category: 'Auth' },
-      { key: 'payments', model: Payment, displayName: 'Orders & Payments', category: 'Billing' },
-      { key: 'liveLocations', model: LiveLocation, displayName: 'GPS Location Telemetry', category: 'Tracking' },
-      { key: 'attendances', model: Attendance, displayName: 'Attendance Records', category: 'Operations' },
-      { key: 'meetings', model: Meeting, displayName: 'Client Visits & Meetings', category: 'Field CRM' },
-      { key: 'tasks', model: Task, displayName: 'Field Tasks & Jobs', category: 'Operations' },
-      { key: 'expenses', model: Expense, displayName: 'Expense Claims & OCR', category: 'Finance' },
-      { key: 'leaves', model: Leave, displayName: 'Leave Requests', category: 'HR' },
+      { key: 'organizations', model: Organization, displayName: 'Customer Organizations', category: 'Tenancy' },
+      { key: 'users', model: User, displayName: 'Registered Users & Staff', category: 'Auth' },
+      { key: 'payments', model: Payment, displayName: 'Payment Orders & Invoices', category: 'Billing' },
+      { key: 'liveLocations', model: LiveLocation, displayName: 'GPS Live Location Sessions', category: 'Tracking' },
+      { key: 'attendances', model: Attendance, displayName: 'Daily Attendance Punch-Ins', category: 'Operations' },
+      { key: 'meetings', model: Meeting, displayName: 'Field Meetings & Client Visits', category: 'Field CRM' },
+      { key: 'tasks', model: Task, displayName: 'Field Tasks & Job Dispatches', category: 'Operations' },
+      { key: 'expenses', model: Expense, displayName: 'Fuel & OCR Expense Claims', category: 'Finance' },
+      { key: 'leaves', model: Leave, displayName: 'Leave Applications', category: 'HR' },
       { key: 'leads', model: Lead, displayName: 'Sales Leads Pipeline', category: 'Field CRM' },
-      { key: 'auditLogs', model: AuditLog, displayName: 'Security Audit Logs', category: 'Compliance' },
-      { key: 'notifications', model: Notification, displayName: 'In-App Notifications', category: 'Messaging' },
+      { key: 'auditLogs', model: AuditLog, displayName: 'Platform Security Audits', category: 'Compliance' },
+      { key: 'notifications', model: Notification, displayName: 'Notification Deliveries', category: 'Messaging' },
     ];
 
     const collectionsDetail = [];
@@ -787,17 +787,39 @@ exports.getSystemHealth = async (req, res) => {
         const docCount = await item.model.countDocuments();
         counts[item.key] = docCount;
 
-        // Estimated document storage breakdown
-        const avgSize = dbStorage.avgObjSizeBytes || 350;
-        const estDataKb = Math.round((docCount * avgSize) / 1024);
+        let dataSizeBytes = 0;
+        let avgObjSize = 0;
+        let storageSizeBytes = 0;
+        let totalIndexSize = 0;
+
+        try {
+          if (item.model && item.model.collection) {
+            const collStats = await item.model.collection.stats();
+            dataSizeBytes = collStats.size || 0;
+            avgObjSize = Math.round(collStats.avgObjSize || 0);
+            storageSizeBytes = collStats.storageSize || 0;
+            totalIndexSize = collStats.totalIndexSize || 0;
+          }
+        } catch (csErr) {
+          // Fallback calculation if db user lacks collStats command permission
+          avgObjSize = dbStorage.avgObjSizeBytes || 350;
+          dataSizeBytes = docCount * avgObjSize;
+        }
+
+        const sizeKb = Math.round(dataSizeBytes / 1024);
+        const sizeMb = (dataSizeBytes / (1024 * 1024)).toFixed(2);
+        const sizeFormatted = dataSizeBytes > 1024 * 1024 ? `${sizeMb} MB` : `${sizeKb} KB`;
 
         collectionsDetail.push({
           key: item.key,
           name: item.displayName,
           category: item.category,
           count: docCount,
-          estimatedDataKb: estDataKb,
-          sizeFormatted: estDataKb > 1024 ? `${(estDataKb / 1024).toFixed(2)} MB` : `${estDataKb} KB`,
+          sizeBytes: dataSizeBytes,
+          storageSizeBytes,
+          totalIndexSize,
+          avgObjSizeBytes: avgObjSize,
+          sizeFormatted,
         });
       } catch (err) {
         counts[item.key] = 0;
@@ -818,7 +840,7 @@ exports.getSystemHealth = async (req, res) => {
       nodeVersion: process.version,
       uptimeSeconds: Math.floor(process.uptime()),
       cpuCount: cpus.length,
-      cpuModel: cpus[0]?.model || 'Standard CPU',
+      cpuModel: cpus[0]?.model || 'Standard Server CPU',
       cpuSpeedMhz: cpus[0]?.speed || 0,
       loadAvg: os.loadavg ? os.loadavg().map((n) => n.toFixed(2)) : ['0.00', '0.00', '0.00'],
       memory: {
@@ -834,7 +856,7 @@ exports.getSystemHealth = async (req, res) => {
         usedMb: Math.round(usedMem / 1024 / 1024),
         usedPercent: memUsedPercent,
       },
-      dbStatus: mongoose.connection.readyState === 1 ? 'Healthy & Connected' : 'Disconnected',
+      dbStatus: mongoose.connection.readyState === 1 ? 'Optimal & Connected' : 'Disconnected',
       dbPingMs: pingMs,
     };
 
