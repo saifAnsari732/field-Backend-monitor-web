@@ -86,12 +86,6 @@ exports.getDashboardStats = async (req, res) => {
     const userRole = (req.user?.role || '').toUpperCase();
     const isSuperAdmin = ['SUPER_ADMIN', 'SUPERADMIN'].includes(userRole);
     const orgId = req.user?.organizationId?._id || req.user?.organizationId;
-    const cacheKey = `admin_dashboard_stats_${isSuperAdmin ? 'super' : orgId || req.user?._id}`;
-
-    const cachedStats = await liveCache.get(cacheKey);
-    if (cachedStats) {
-      return res.json({ success: true, stats: cachedStats, fromCache: true });
-    }
 
     const today = new Date().toISOString().slice(0, 10);
     const userFilter = isSuperAdmin ? {} : { organizationId: orgId };
@@ -101,16 +95,18 @@ exports.getDashboardStats = async (req, res) => {
     }
 
     // Get list of matching employee IDs for scoped sub-queries
-    const scopedEmployees = await User.find(userFilter).select('_id');
+    const scopedEmployees = await User.find(userFilter).select('_id name department manager isTracking isOnline lastSeen employeeId avatar');
     const empIds = scopedEmployees.map(e => e._id);
 
     const [
-      totalEmployees, activeEmployees, trackingNow,
+      totalEmployees, totalManagers, activeEmployees, trackingNow,
       totalMeetings, todayMeetings, pendingExpenses,
       totalExpenses, presentCount, lateCount, halfDayCount,
-      totalKmData, totalLeads, totalLeaves, totalTasks
+      totalKmData, totalLeads, totalLeaves, totalTasks,
+      dbRecentEmployees, dbUpcomingLeaves, dbLiveLocations, dbRecentActivities
     ] = await Promise.all([
-      User.countDocuments({ role: { $nin: ['SUPER_ADMIN', 'SUPERADMIN'] }, isApproved: true, ...userFilter }),
+      User.countDocuments({ role: { $in: ['EMPLOYEE', 'employee', 'FIELD_EXECUTIVE'] }, isApproved: true, ...userFilter }),
+      User.countDocuments({ role: { $in: ['MANAGER', 'manager'] }, isApproved: true, ...userFilter }),
       User.countDocuments({ role: { $nin: ['SUPER_ADMIN', 'SUPERADMIN'] }, isOnline: true, ...userFilter }),
       User.countDocuments({ role: { $nin: ['SUPER_ADMIN', 'SUPERADMIN'] }, isTracking: true, ...userFilter }),
       Meeting.countDocuments(isSuperAdmin ? {} : { employee: { $in: empIds } }),
@@ -130,29 +126,86 @@ exports.getDashboardStats = async (req, res) => {
       Lead.countDocuments(isSuperAdmin ? {} : { employee: { $in: empIds } }),
       Leave.countDocuments(isSuperAdmin ? {} : { employee: { $in: empIds } }),
       Task.countDocuments(isSuperAdmin ? {} : { employee: { $in: empIds } }),
+      User.find({ role: { $nin: ['SUPER_ADMIN', 'SUPERADMIN'] }, ...userFilter })
+        .populate('manager', 'name')
+        .sort({ isTracking: -1, isOnline: -1, updatedAt: -1 })
+        .limit(10)
+        .lean(),
+      Leave.find(isSuperAdmin ? { status: 'pending' } : { employee: { $in: empIds }, status: 'pending' })
+        .populate('employee', 'name department')
+        .sort({ startDate: 1 })
+        .limit(5)
+        .lean(),
+      LiveLocation.find({ date: today, ...(isSuperAdmin ? {} : { employee: { $in: empIds } }) })
+        .populate('employee', 'name department')
+        .sort({ updatedAt: -1 })
+        .limit(15)
+        .lean(),
+      ActivityLog.find(isSuperAdmin ? {} : { employee: { $in: empIds } })
+        .populate('employee', 'name department')
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
     ]);
 
-    const absentCount = Math.max(0, totalEmployees - presentCount);
-    const attendanceRate = totalEmployees > 0 ? Math.round((presentCount / totalEmployees) * 100) : 0;
+    const effectiveTotalEmployees = totalEmployees > 0 ? totalEmployees : scopedEmployees.length;
+    const absentCount = Math.max(0, effectiveTotalEmployees - presentCount);
+    const attendanceRate = effectiveTotalEmployees > 0 ? Math.round((presentCount / effectiveTotalEmployees) * 100) : 0;
 
-    const monthlyMeetings = await Meeting.aggregate([
-      ...(isSuperAdmin ? [] : [{ $match: { employee: { $in: empIds } } }]),
-      { $group: { _id: { $month: '$date' }, count: { $sum: 1 } } },
-      { $sort: { '_id': 1 } }
-    ]);
+    // Build 7-day attendance trend data for bar chart
+    const last7Days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
+      last7Days.push({ dateStr, dayName });
+    }
 
-    const expenseByCategory = await Expense.aggregate([
-      { $match: { status: 'approved', ...(isSuperAdmin ? {} : { employee: { $in: empIds } }) } },
-      { $group: { _id: '$category', total: { $sum: '$amount' } } }
-    ]);
+    const attendance7DaysRaw = await Attendance.find({
+      date: { $in: last7Days.map(l => l.dateStr) },
+      ...(isSuperAdmin ? {} : { employee: { $in: empIds } })
+    }).lean();
+
+    const attendanceOverview = last7Days.map(({ dateStr, dayName }) => {
+      const dayRecords = attendance7DaysRaw.filter(a => a.date === dateStr);
+      const Present = dayRecords.filter(a => a.status === 'present').length;
+      const Absent = dayRecords.filter(a => a.status === 'absent').length;
+      const Late = dayRecords.filter(a => a.status === 'late').length;
+      return {
+        date: dateStr,
+        day: dayName,
+        Present,
+        Absent,
+        Late: Late || 0,
+      };
+    });
+
+    // Department-wise distribution
+    const deptMap = {};
+    scopedEmployees.forEach(e => {
+      const dept = e.department || 'Field Services';
+      deptMap[dept] = (deptMap[dept] || 0) + 1;
+    });
+    const colors = ['#3b82f6', '#8b5cf6', '#10b981', '#f59e0b', '#ec4899', '#06b6d4'];
+    const departmentWise = Object.keys(deptMap).map((name, idx) => ({
+      name,
+      count: deptMap[name],
+      color: colors[idx % colors.length],
+    }));
 
     const stats = {
-      totalEmployees,
+      totalEmployees: effectiveTotalEmployees,
+      totalManagers: totalManagers || 0,
       activeEmployees,
+      currentlyOnline: activeEmployees,
       trackingNow,
+      currentlyTracking: trackingNow,
       todayAttendance: presentCount,
       presentEmployees: presentCount,
+      presentToday: presentCount,
       absentEmployees: absentCount,
+      absentToday: absentCount,
       lateEmployees: lateCount,
       halfDayEmployees: halfDayCount,
       attendanceRate,
@@ -164,17 +217,21 @@ exports.getDashboardStats = async (req, res) => {
       totalLeads: totalLeads || 0,
       totalLeaves: totalLeaves || 0,
       totalTasks: totalTasks || 0,
-      monthlyMeetings,
-      expenseByCategory,
     };
-
-    await liveCache.set(cacheKey, stats, 30);
 
     res.json({
       success: true,
-      stats
+      stats,
+      attendanceOverview,
+      departmentWise,
+      recentEmployees: dbRecentEmployees,
+      upcomingLeaves: dbUpcomingLeaves,
+      liveLocations: dbLiveLocations,
+      recentActivities: dbRecentActivities,
     });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 exports.getAllEmployees = async (req, res) => {
@@ -347,9 +404,65 @@ exports.getManagers = async (req, res) => {
       filter.organizationId = orgId;
     }
 
-    const managers = await User.find(filter).select('name email designation employeeId department role allocatedArea address isActive isOnline isTracking isApproved isBlocked salary TA').sort({ name: 1 });
-    res.json({ success: true, managers });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    const managers = await User.find(filter)
+      .select('name email designation employeeId department role allocatedArea address isActive isOnline isTracking isApproved isBlocked salary TA assignedEmployees managers avatar')
+      .sort({ name: 1 })
+      .lean();
+
+    // Dynamically enrich each manager with their real assigned employees from User collection
+    const managerIds = managers.map(m => m._id);
+    const allAssignedEmployees = await User.find({
+      $or: [
+        { manager: { $in: managerIds } },
+        { managerId: { $in: managerIds } },
+        { managers: { $in: managerIds } }
+      ]
+    }).select('_id name email department designation manager managerId managers isOnline isTracking avatar').lean();
+
+    const enrichedManagers = managers.map(mgr => {
+      const mgrIdStr = String(mgr._id);
+      
+      // Find all employees assigned to this manager
+      const directEmps = allAssignedEmployees.filter(e => {
+        const eMgr = String(e.manager || e.managerId || '');
+        const eMgrs = (e.managers || []).map(m => String(m));
+        return eMgr === mgrIdStr || eMgrs.includes(mgrIdStr);
+      });
+
+      // Merge stored assignedEmployees with direct DB assigned employees
+      const storedAssigned = Array.isArray(mgr.assignedEmployees) ? mgr.assignedEmployees : [];
+      const combinedMap = new Map();
+
+      directEmps.forEach(e => {
+        combinedMap.set(String(e._id), {
+          _id: e._id,
+          name: e.name,
+          email: e.email,
+          department: e.department || 'Field Services',
+          designation: e.designation || 'Field Executive',
+          isOnline: e.isOnline,
+          isTracking: e.isTracking,
+          avatar: e.avatar,
+        });
+      });
+
+      storedAssigned.forEach(e => {
+        const id = String(e._id || e);
+        if (!combinedMap.has(id)) {
+          combinedMap.set(id, e);
+        }
+      });
+
+      return {
+        ...mgr,
+        assignedEmployees: Array.from(combinedMap.values()),
+      };
+    });
+
+    res.json({ success: true, managers: enrichedManagers });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 // Helper to scope employee IDs by tenant and role
@@ -524,9 +637,9 @@ exports.getTrackingHistory = async (req, res) => {
         const verifiedKm = Math.round(ledgerAgg[0].totalKm * 100) / 100;
         s.totalDistance = verifiedKm;
         s.officialDistance = verifiedKm;
-      } else if (!s.totalDistance || s.totalDistance === 0) {
+      } else if ((!s.totalDistance || s.totalDistance === 0) && Array.isArray(s.coordinates) && s.coordinates.length >= 2) {
         try {
-          const recalculated = await trackingController.recalculateSessionFromPoints(s.sessionId);
+          const recalculated = await trackingController.recalculateSessionFromPoints(s.sessionId, s.date, s._id);
           if (recalculated > 0) {
             s.totalDistance = recalculated;
             s.officialDistance = recalculated;
@@ -604,4 +717,106 @@ exports.updateOrganizationSettings = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// @desc Admin KM distance adjustment & credit
+exports.adjustDistance = async (req, res) => {
+  try {
+    const mongoose = require('mongoose');
+    const { LiveLocation, Attendance, ActivityLog } = require('../models/index');
+    const User = require('../models/User.model');
+
+    const { sessionId, employeeId, date, adjustmentKm, distanceToAdd, newTotalDistance, km, mode = 'add', reason } = req.body;
+    const kmValue = parseFloat(adjustmentKm ?? distanceToAdd ?? newTotalDistance ?? km);
+
+    if (isNaN(kmValue) || kmValue < 0) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid non-negative distance in KM' });
+    }
+
+    if (!employeeId && !sessionId) {
+      return res.status(400).json({ success: false, message: 'Employee ID or Session ID is required for distance adjustment' });
+    }
+
+    let session = null;
+
+    if (sessionId) {
+      const isValidId = mongoose.Types.ObjectId.isValid(sessionId);
+      session = await LiveLocation.findOne({
+        $or: [
+          ...(isValidId ? [{ _id: sessionId }] : []),
+          { sessionId: sessionId }
+        ]
+      });
+    }
+
+    const targetEmpId = session?.employee || employeeId;
+    const targetDate = date || session?.date || new Date().toISOString().slice(0, 10);
+
+    if (!session && targetEmpId) {
+      session = await LiveLocation.findOne({ employee: targetEmpId, date: targetDate }).sort({ updatedAt: -1 });
+    }
+
+    if (!session && targetEmpId) {
+      const newSessionId = `MANUAL-${targetEmpId}-${Date.now()}`;
+      const empUser = await User.findById(targetEmpId);
+      session = new LiveLocation({
+        organizationId: empUser?.organizationId || req.user?.organizationId,
+        employee: targetEmpId,
+        sessionId: newSessionId,
+        date: targetDate,
+        startTime: new Date(),
+        isActive: false,
+        totalDistance: 0,
+        officialDistance: 0,
+        acceptedDistance: 0,
+      });
+    }
+
+    if (!session) {
+      return res.status(404).json({ success: false, message: 'Could not find or create a tracking session for this employee' });
+    }
+
+    const currentDist = Number(session.totalDistance || session.officialDistance || 0);
+    const addedKm = mode === 'add' ? kmValue : Math.max(0, kmValue - currentDist);
+    const newTotalDist = Math.round((mode === 'add' ? currentDist + kmValue : kmValue) * 100) / 100;
+
+    session.totalDistance = newTotalDist;
+    session.officialDistance = newTotalDist;
+    session.acceptedDistance = newTotalDist;
+    session.manualDistanceAdded = (session.manualDistanceAdded || 0) + addedKm;
+    if (reason) session.manualAdjustmentReason = reason;
+    await session.save();
+
+    // Update or sync Attendance record for this employee and date
+    await Attendance.findOneAndUpdate(
+      { employee: targetEmpId, date: targetDate },
+      {
+        totalDistanceTraveled: newTotalDist,
+        officialDistance: newTotalDist,
+      }
+    ).catch(() => {});
+
+    // Create ActivityLog entry
+    const empUser = await User.findById(targetEmpId).select('name');
+    await ActivityLog.create({
+      employee: req.user._id,
+      action: 'KM_ADJUSTMENT',
+      description: `Adjusted distance for ${empUser?.name || 'Employee'}: set to ${newTotalDist} KM (${mode === 'add' ? '+' : ''}${kmValue} KM). Reason: ${reason || 'Admin credit'}`
+    }).catch(() => {});
+
+    // Clear live cache so dashboard reflects new KM instantly
+    const cacheKey = `admin_dashboard_stats_${req.user?.organizationId?._id || req.user?.organizationId || 'super'}`;
+    await liveCache.del(cacheKey).catch(() => {});
+
+    res.json({
+      success: true,
+      message: `Successfully adjusted distance for ${empUser?.name || 'Employee'} to ${newTotalDist} KM`,
+      session,
+      newDistance: newTotalDist,
+    });
+  } catch (err) {
+    console.error('adjustDistance error:', err);
+    res.status(500).json({ success: false, message: err.message || 'Failed to adjust distance' });
+  }
+};
+
 

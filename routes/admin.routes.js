@@ -12,6 +12,7 @@ router.put('/employees/:id/approve', protect, authorize('admin', 'hr', 'manager'
 router.put('/employees/:id/block', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), ac.toggleBlock);
 router.get('/attendance', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), ac.getAttendanceReport);
 router.get('/tracking-history', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), ac.getTrackingHistory);
+router.put('/tracking/adjust-distance', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), ac.adjustDistance);
 router.put('/employees/:id', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), ac.updateEmployee);
 router.get('/reports/consolidated', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), rc.getConsolidatedReport);
 router.get('/organization', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), ac.getOrganizationSettings);
