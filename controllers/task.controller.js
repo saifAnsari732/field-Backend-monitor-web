@@ -117,12 +117,23 @@ exports.getAllTasks = async (req, res) => {
         filter.organizationId = rawOrgId;
       }
       if (userRole === 'MANAGER') {
+        let assignedIds = (req.user?.assignedEmployees || []).map(e => e?._id || e).filter(Boolean);
+        if (assignedIds.length === 0) {
+          const uDoc = await User.findById(req.user._id).select('assignedEmployees').lean();
+          if (uDoc?.assignedEmployees?.length) {
+            assignedIds = uDoc.assignedEmployees.map(e => e?._id || e).filter(Boolean);
+          }
+        }
         const mgrUsers = await User.find({
           organizationId: rawOrgId,
-          $or: [{ manager: req.user._id }, { managerId: req.user._id }],
+          $or: [
+            { manager: req.user._id },
+            { managerId: req.user._id },
+            ...(assignedIds.length > 0 ? [{ _id: { $in: assignedIds } }] : [])
+          ],
         }).select('_id');
-        const assignedIds = mgrUsers.map((u) => u._id);
-        filter.employee = { $in: assignedIds };
+        const teamIds = mgrUsers.map((u) => u._id);
+        filter.employee = { $in: teamIds };
       }
     }
 

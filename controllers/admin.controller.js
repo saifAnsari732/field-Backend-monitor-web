@@ -91,7 +91,19 @@ exports.getDashboardStats = async (req, res) => {
     const userFilter = isSuperAdmin ? {} : { organizationId: orgId };
 
     if (userRole === 'MANAGER') {
-      userFilter.$or = [{ managerId: req.user._id }, { manager: req.user._id }, { _id: req.user._id }];
+      let assignedIds = (req.user?.assignedEmployees || []).map(e => e?._id || e).filter(Boolean);
+      if (assignedIds.length === 0) {
+        const uDoc = await User.findById(req.user._id).select('assignedEmployees').lean();
+        if (uDoc?.assignedEmployees?.length) {
+          assignedIds = uDoc.assignedEmployees.map(e => e?._id || e).filter(Boolean);
+        }
+      }
+      userFilter.$or = [
+        { managerId: req.user._id },
+        { manager: req.user._id },
+        { _id: req.user._id },
+        ...(assignedIds.length > 0 ? [{ _id: { $in: assignedIds } }] : [])
+      ];
     }
 
     // Get list of matching employee IDs for scoped sub-queries
@@ -247,7 +259,19 @@ exports.getAllEmployees = async (req, res) => {
     }
 
     if (userRole === 'MANAGER') {
-      filter.$or = [{ managerId: req.user._id }, { manager: req.user._id }, { _id: req.user._id }];
+      let assignedIds = (req.user?.assignedEmployees || []).map(e => e?._id || e).filter(Boolean);
+      if (assignedIds.length === 0) {
+        const uDoc = await User.findById(req.user._id).select('assignedEmployees').lean();
+        if (uDoc?.assignedEmployees?.length) {
+          assignedIds = uDoc.assignedEmployees.map(e => e?._id || e).filter(Boolean);
+        }
+      }
+      filter.$or = [
+        { managerId: req.user._id },
+        { manager: req.user._id },
+        { _id: req.user._id },
+        ...(assignedIds.length > 0 ? [{ _id: { $in: assignedIds } }] : [])
+      ];
     }
 
     if (role && role !== 'all') {
@@ -331,12 +355,11 @@ exports.getAllEmployees = async (req, res) => {
       const live = liveMap.get(empIdStr);
 
       const isLive = live?.isActive === true || empObj.isTracking === true;
-      const todayKm = Math.round(Math.max(
-        Number(att?.totalDistanceTraveled) || 0,
-        empSessionsDistMap.get(empIdStr) || 0,
-        Number(live?.totalDistance) || 0,
-        Number(live?.officialDistance) || 0
-      ) * 100) / 100;
+      const authoritativeKm = Number(live?.officialDistance) ||
+        Number(live?.totalDistance) ||
+        Number(att?.totalDistanceTraveled) ||
+        (empSessionsDistMap.get(empIdStr) || 0);
+      const todayKm = Math.round(authoritativeKm * 100) / 100;
 
       const lastPingTime = live?.lastActivity || live?.updatedAt || att?.checkIn || empObj.lastSeen || empObj.updatedAt;
 
@@ -473,7 +496,19 @@ const getScopedEmployeeIds = async (user) => {
   const orgId = user?.organizationId?._id || user?.organizationId;
   const userScope = { organizationId: orgId };
   if (userRole === 'MANAGER') {
-    userScope.$or = [{ managerId: user._id }, { manager: user._id }, { _id: user._id }];
+    let assignedIds = (user?.assignedEmployees || []).map(e => e?._id || e).filter(Boolean);
+    if (assignedIds.length === 0) {
+      const uDoc = await User.findById(user._id).select('assignedEmployees').lean();
+      if (uDoc?.assignedEmployees?.length) {
+        assignedIds = uDoc.assignedEmployees.map(e => e?._id || e).filter(Boolean);
+      }
+    }
+    userScope.$or = [
+      { managerId: user._id },
+      { manager: user._id },
+      { _id: user._id },
+      ...(assignedIds.length > 0 ? [{ _id: { $in: assignedIds } }] : [])
+    ];
   } else if (userRole === 'EMPLOYEE') {
     userScope._id = user._id;
   }
@@ -641,8 +676,9 @@ exports.getTrackingHistory = async (req, res) => {
         const verifiedKm = Math.round(ledgerAgg[0].totalKm * 100) / 100;
         const manualAdded = Number(s.manualDistanceAdded || 0);
         const finalKm = Math.round((verifiedKm + manualAdded) * 100) / 100;
-        s.totalDistance = Math.max(Number(s.totalDistance || 0), finalKm);
-        s.officialDistance = Math.max(Number(s.officialDistance || 0), finalKm);
+        const cleanSessionDist = finalKm > 0 ? finalKm : Number(s.totalDistance || 0);
+        s.totalDistance = cleanSessionDist;
+        s.officialDistance = cleanSessionDist;
       } else if (Number(s.manualDistanceAdded || 0) > 0 || Number(s.totalDistance || 0) > 0) {
         // Keep existing totalDistance / officialDistance when manual credit exists or when distance is set
         s.totalDistance = Number(s.totalDistance || s.officialDistance || 0);

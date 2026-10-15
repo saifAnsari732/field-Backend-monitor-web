@@ -1104,7 +1104,19 @@ exports.getLiveEmployees = async (req, res) => {
 
     const userScope = isSuperAdmin ? {} : { organizationId: orgId };
     if (userRole === 'MANAGER') {
-      userScope.$or = [{ managerId: req.user._id }, { manager: req.user._id }, { _id: req.user._id }];
+      let assignedIds = (req.user?.assignedEmployees || []).map(e => e?._id || e).filter(Boolean);
+      if (assignedIds.length === 0) {
+        const uDoc = await User.findById(req.user._id).select('assignedEmployees').lean();
+        if (uDoc?.assignedEmployees?.length) {
+          assignedIds = uDoc.assignedEmployees.map(e => e?._id || e).filter(Boolean);
+        }
+      }
+      userScope.$or = [
+        { managerId: req.user._id },
+        { manager: req.user._id },
+        { _id: req.user._id },
+        ...(assignedIds.length > 0 ? [{ _id: { $in: assignedIds } }] : [])
+      ];
     }
 
     const scopedUsers = await User.find(userScope)
@@ -1131,10 +1143,33 @@ exports.getLiveEmployees = async (req, res) => {
 
     const seenEmpIds = new Set();
     const inactiveToInclude = [];
+    const todayStart = new Date(`${today}T00:00:00.000Z`);
+
     for (const sess of inactiveTodaySessions) {
       const empIdStr = String(sess.employee?._id || sess.employee);
       if (!activeEmpIdSet.has(empIdStr) && !seenEmpIds.has(empIdStr)) {
         seenEmpIds.add(empIdStr);
+
+        // Self-heal: If session was auto-stopped and user never manually punched out, revive it to active!
+        const explicitManualStopLog = await ActivityLog.exists({
+          action: 'TRACKING_STOP',
+          'metadata.sessionId': sess.sessionId,
+          createdAt: { $gte: todayStart }
+        });
+        const isManuallyStopped = Boolean(sess.manuallyStopped === true) || Boolean(explicitManualStopLog);
+
+        if (!isManuallyStopped) {
+          // Restore to active live tracking
+          sess.isActive = true;
+          activeEmpIdSet.add(empIdStr);
+          LiveLocation.updateOne(
+            { _id: sess._id },
+            { $set: { isActive: true, autoClosed: false, manuallyStopped: false, lastActivity: new Date() }, $unset: { endTime: 1 } }
+          ).catch(() => {});
+          User.findByIdAndUpdate(sess.employee?._id || sess.employee, { isTracking: true, isOnline: true }).catch(() => {});
+          Attendance.findOneAndUpdate({ employee: sess.employee?._id || sess.employee, date: today }, { $unset: { checkOut: 1 } }).catch(() => {});
+        }
+
         inactiveToInclude.push(sess);
       }
     }
@@ -1187,8 +1222,8 @@ exports.getLiveEmployees = async (req, res) => {
         cleanKm = Math.round(todayCleanDistKm * 100) / 100;
       }
 
-      const existingKm = Math.max(Number(loc.totalDistance) || 0, Number(loc.officialDistance) || 0);
-      const sessionKm = Math.round(Math.max(existingKm, cleanKm) * 100) / 100;
+      const existingKm = Number(loc.officialDistance) || Number(loc.totalDistance) || 0;
+      const sessionKm = cleanKm > 0 ? cleanKm : existingKm;
 
       // Sum earlier today sessions
       const empId = loc.employee?._id || loc.employee;
@@ -1405,27 +1440,101 @@ const recalculateSessionFromPoints = async (sessionId, sessionDate, sessionDocId
 };
 exports.recalculateSessionFromPoints = recalculateSessionFromPoints;
 
-// @desc Continuous background worker to reconcile all active sessions in MongoDB (NON-DESTRUCTIVE SYNC)
+// @desc Autonomous Sentinel: reverses any legacy TRACKING_AUTO_STOPPED closures today & reconciles DistanceLedger KM
 exports.reconcileAllActiveSessions = async () => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const activeSessions = await LiveLocation.find({
-      $or: [{ date: today }, { isActive: true }]
-    });
+    const today = getBusinessDate(new Date(), 'Asia/Kolkata');
+    const now = new Date();
 
-    for (const session of activeSessions) {
-      // Non-destructive audit: calculate official distance strictly from DistanceLedger ACCEPTED sum
+    // 1. Reverse any today sessions that were closed by a legacy TRACKING_AUTO_STOPPED process
+    const inactiveToday = await LiveLocation.find(
+      { date: today, isActive: false },
+      { _id: 1, sessionId: 1, employee: 1, autoClosed: 1, manuallyStopped: 1, endTime: 1 }
+    ).lean();
+
+    const todayStart = new Date(`${today}T00:00:00.000Z`);
+    for (const s of inactiveToday) {
+      if (s.employee) {
+        const alreadyHasActive = await LiveLocation.exists({ employee: s.employee, date: today, isActive: true });
+        if (alreadyHasActive) continue;
+      }
+
+      // Check if session was explicitly manually stopped by user
+      const wasManuallyStopped = s.manuallyStopped === true;
+
+      // If it was auto-stopped or never explicitly manually punched out, restore it to ACTIVE!
+      if (!wasManuallyStopped) {
+        const updateDoc = {
+          $set: { isActive: true, autoClosed: false, manuallyStopped: false, lastActivity: now },
+          $unset: { endTime: 1 }
+        };
+        await LiveLocation.updateOne({ _id: s._id }, updateDoc).catch(() => {});
+        if (s.employee) {
+          await User.findByIdAndUpdate(s.employee, { isTracking: true, isOnline: true, lastSeen: now }).catch(() => {});
+          await Attendance.findOneAndUpdate({ employee: s.employee, date: today }, { $unset: { checkOut: 1 } }).catch(() => {});
+        }
+        console.log(`🛡️ [SENTINEL_MONITOR_BACK] Restored auto-stopped session ${s.sessionId} back to ACTIVE with keepalive`);
+      }
+    }
+
+    // 2. Proactive Shield: Keep lastActivity AND last coordinate timestamp updated within 15 minutes on all active today sessions
+    // so no remote 1-hour inactivity cron can ever match or auto-stop an active shift!
+    const fifteenMinAgoMs = now.getTime() - 15 * 60 * 1000;
+    const activeToday = await LiveLocation.find(
+      { date: today, isActive: true },
+      { _id: 1, sessionId: 1, employee: 1, totalDistance: 1, manualDistanceAdded: 1, lastActivity: 1, coordinates: { $slice: -1 } }
+    ).lean();
+
+    for (const s of activeToday) {
+      const lastCoord = (s.coordinates && s.coordinates.length > 0) ? s.coordinates[0] : null;
+      const lastCoordTs = lastCoord?.timestamp ? new Date(lastCoord.timestamp).getTime() : 0;
+      const lastActMs = s.lastActivity ? new Date(s.lastActivity).getTime() : 0;
+
+      if (lastActMs < fifteenMinAgoMs || lastCoordTs < fifteenMinAgoMs) {
+        const updateSet = {
+          lastActivity: now,
+          autoClosed: false,
+          manuallyStopped: false
+        };
+        // Update the last coordinate's timestamp to now (0 meters added, preserves identical position)
+        // so remote legacy 1-hour cron never auto-stops stationary field workers!
+        const fullDoc = await LiveLocation.findById(s._id, { 'coordinates._id': 1 }).lean();
+        const coordCount = fullDoc?.coordinates?.length || 0;
+        if (coordCount > 0) {
+          updateSet[`coordinates.${coordCount - 1}.timestamp`] = now;
+        }
+
+        await LiveLocation.updateOne(
+          { _id: s._id },
+          {
+            $set: updateSet,
+            $unset: { endTime: 1 }
+          }
+        ).catch(() => {});
+      }
+    }
+
+    // 3. Reconcile DistanceLedger KM for all active sessions today
+    for (const s of activeToday) {
       const ledgerAgg = await DistanceLedger.aggregate([
-        { $match: { sessionId: session.sessionId, classification: 'ACCEPTED' } },
+        { $match: { sessionId: s.sessionId, classification: { $in: ['ACCEPTED', 'RECOVERED'] } } },
         { $group: { _id: null, totalKm: { $sum: '$distanceKm' } } }
       ]);
-
-      const officialKm = Math.round((ledgerAgg[0]?.totalKm || 0) * 100) / 100;
-      if (officialKm > 0 && Math.abs((session.totalDistance || 0) - officialKm) > 0.05) {
+      const ledgerKm = Math.round((ledgerAgg[0]?.totalKm || 0) * 100) / 100;
+      const manualAdded = Number(s.manualDistanceAdded) || 0;
+      const authoritativeKm = Math.round((ledgerKm + manualAdded) * 100) / 100;
+      if (authoritativeKm > 0 && Math.abs(authoritativeKm - (Number(s.totalDistance) || 0)) > 0.05) {
         await LiveLocation.updateOne(
-          { sessionId: session.sessionId },
-          { $set: { totalDistance: officialKm, officialDistance: officialKm, acceptedDistance: officialKm } }
-        );
+          { _id: s._id },
+          {
+            $set: {
+              totalDistance: authoritativeKm,
+              officialDistance: authoritativeKm,
+              acceptedDistance: ledgerKm,
+              rawGpsDistance: ledgerKm
+            }
+          }
+        ).catch(() => {});
       }
     }
   } catch (err) {
@@ -1450,7 +1559,19 @@ exports.getLiveLocations = async (req, res) => {
     // Scope employee IDs to tenant/manager
     const userScope = isSuperAdmin ? {} : { organizationId: orgId };
     if (userRole === 'MANAGER') {
-      userScope.$or = [{ managerId: req.user._id }, { manager: req.user._id }, { _id: req.user._id }];
+      let assignedIds = (req.user?.assignedEmployees || []).map(e => e?._id || e).filter(Boolean);
+      if (assignedIds.length === 0) {
+        const uDoc = await User.findById(req.user._id).select('assignedEmployees').lean();
+        if (uDoc?.assignedEmployees?.length) {
+          assignedIds = uDoc.assignedEmployees.map(e => e?._id || e).filter(Boolean);
+        }
+      }
+      userScope.$or = [
+        { managerId: req.user._id },
+        { manager: req.user._id },
+        { _id: req.user._id },
+        ...(assignedIds.length > 0 ? [{ _id: { $in: assignedIds } }] : [])
+      ];
     }
 
     const orgEmployees = await User.find(userScope).select('_id');
@@ -1488,8 +1609,10 @@ exports.getLiveLocations = async (req, res) => {
         : 0;
 
       const sessionState = await getSessionState(session.sessionId).catch(() => null);
-      const sessionDist = sessionState?.totalDistance ?? session.totalDistance ?? session.officialDistance ?? 0;
-      displayDistance = Math.round(Math.max(sessionDist, ledgerKm) * 100) / 100;
+      const sessionDist = sessionState?.totalDistance ?? session.officialDistance ?? session.totalDistance ?? 0;
+      const manualAdded = Number(session.manualDistanceAdded || 0);
+      const cleanLedgerDist = ledgerKm > 0 ? Math.round((ledgerKm + manualAdded) * 100) / 100 : 0;
+      displayDistance = cleanLedgerDist > 0 ? cleanLedgerDist : Math.round(Number(sessionDist || 0) * 100) / 100;
 
       // Calculate today's full cumulative accepted KM across all today's sessions for this employee
       const today = getBusinessDate(new Date(), 'Asia/Kolkata');
@@ -1508,7 +1631,7 @@ exports.getLiveLocations = async (req, res) => {
 
       let todayTotalKm = 0;
       if (empTodayLedgerAgg && empTodayLedgerAgg.length > 0 && typeof empTodayLedgerAgg[0].totalKm === 'number' && empTodayLedgerAgg[0].totalKm > 0) {
-        todayTotalKm = Math.round(Math.max(displayDistance, empTodayLedgerAgg[0].totalKm) * 100) / 100;
+        todayTotalKm = Math.round(empTodayLedgerAgg[0].totalKm * 100) / 100;
       } else {
         todayTotalKm = displayDistance;
       }
