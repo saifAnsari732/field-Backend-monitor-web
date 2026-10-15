@@ -77,6 +77,8 @@ const userSchema = new mongoose.Schema(
       },
     ],
     allocatedArea: { type: String, default: "Default Area" },
+    totalDistance: { type: Number, default: 0 },
+    totalDistanceTraveled: { type: Number, default: 0 },
     resetOtp: { type: String, select: false },
     resetOtpExpires: { type: Date, select: false },
   },

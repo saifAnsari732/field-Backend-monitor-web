@@ -143,7 +143,7 @@ router.post('/', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'supe
 
 router.post('/assign-manager', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), async (req, res) => {
   try {
-    const { managerId, employeeIds } = req.body;
+    const { managerId, employeeIds, mode = 'replace' } = req.body;
 
     if (!managerId) {
       return res.status(400).json({ success: false, message: 'Manager ID is required' });
@@ -154,7 +154,7 @@ router.post('/assign-manager', protect, authorize('admin', 'hr', 'manager', 'org
       return res.status(404).json({ success: false, message: 'Manager not found' });
     }
 
-    const idsToAssign = Array.isArray(employeeIds) ? employeeIds : [];
+    const idsToAssign = Array.isArray(employeeIds) ? employeeIds.map(String) : [];
 
     // 1. Assign targetManager to all selected employeeIds
     if (idsToAssign.length > 0) {
@@ -171,21 +171,30 @@ router.post('/assign-manager', protect, authorize('admin', 'hr', 'manager', 'org
       );
     }
 
-    // 2. Clear targetManager assignment from any employees NOT in idsToAssign who were previously assigned to this manager
-    await User.updateMany(
-      {
-        $or: [{ managerId: targetManager._id }, { manager: targetManager._id }],
-        _id: { $nin: idsToAssign }
-      },
-      {
-        $unset: { manager: 1, managerId: 1, managerName: 1 },
-        $pull: { managers: targetManager._id }
-      }
-    );
+    // 2. Only unassign employees if explicitly in 'replace' mode (from dedicated Manager team checklist)
+    if (mode === 'replace') {
+      await User.updateMany(
+        {
+          $or: [{ managerId: targetManager._id }, { manager: targetManager._id }],
+          _id: { $nin: idsToAssign }
+        },
+        {
+          $unset: { manager: 1, managerId: 1, managerName: 1 },
+          $pull: { managers: targetManager._id }
+        }
+      );
+    }
 
-    // 3. Update targetManager's assignedEmployees list
-    const assignedEmpObjs = await User.find({ _id: { $in: idsToAssign } }).select('_id name email department designation');
-    const formattedAssigned = assignedEmpObjs.map(e => ({
+    // 3. Re-query all actual employees assigned to this manager from User collection for 100% accuracy
+    const allAssigned = await User.find({
+      $or: [
+        { manager: targetManager._id },
+        { managerId: targetManager._id },
+        { managers: targetManager._id }
+      ]
+    }).select('_id name email department designation');
+
+    const formattedAssigned = allAssigned.map(e => ({
       _id: e._id,
       name: e.name,
       email: e.email,
@@ -193,8 +202,11 @@ router.post('/assign-manager', protect, authorize('admin', 'hr', 'manager', 'org
       designation: e.designation,
     }));
 
-    targetManager.assignedEmployees = formattedAssigned;
-    await targetManager.save();
+    const updatedManager = await User.findByIdAndUpdate(
+      targetManager._id,
+      { $set: { assignedEmployees: formattedAssigned } },
+      { new: true }
+    );
 
     const { ActivityLog } = require('../models/index');
     await ActivityLog.create({
@@ -207,7 +219,7 @@ router.post('/assign-manager', protect, authorize('admin', 'hr', 'manager', 'org
     res.json({
       success: true,
       message: `Successfully assigned ${idsToAssign.length} employee(s) to Manager ${targetManager.name}`,
-      manager: targetManager,
+      manager: updatedManager || targetManager,
       assignedEmployees: formattedAssigned,
     });
   } catch (err) {
@@ -225,7 +237,33 @@ router.get('/:id', protect, async (req, res) => {
 
 router.put('/:id', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), async (req, res) => {
   try {
-    const employee = await User.findByIdAndUpdate(req.params.id, req.body, { new: true }).select('-password');
+    const updateData = { ...req.body };
+    const empId = req.params.id;
+
+    if (updateData.managerId || updateData.manager) {
+      const newMgrId = updateData.managerId || updateData.manager;
+      const mgrObj = await User.findById(newMgrId).select('name');
+      if (mgrObj) {
+        updateData.managerName = mgrObj.name;
+        updateData.managerId = mgrObj._id;
+        updateData.manager = mgrObj._id;
+      }
+    }
+
+    const employee = await User.findByIdAndUpdate(empId, updateData, { new: true }).select('-password');
+
+    // If manager was changed, sync manager's assignedEmployees
+    if (updateData.managerId) {
+      await User.findByIdAndUpdate(updateData.managerId, {
+        $addToSet: {
+          assignedEmployees: {
+            _id: employee._id,
+            name: employee.name,
+          }
+        }
+      });
+    }
+
     res.json({ success: true, employee });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });

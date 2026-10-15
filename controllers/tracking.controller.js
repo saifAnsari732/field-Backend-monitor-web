@@ -20,6 +20,9 @@ function getBusinessDate(date = new Date(), timeZone = 'Asia/Kolkata') {
   }).format(date);
 }
 
+// In-memory throttle for closed session drop logs (max 1 log per 60s per session)
+const closedSessionLogThrottle = new Map();
+
 // @desc Start tracking session
 exports.startTracking = async (req, res) => {
   try {
@@ -284,6 +287,26 @@ exports.updateLocation = async (req, res) => {
     }
 
     if (!activeDoc.isActive) {
+      if (activeDoc.endTime && !activeDoc.autoClosed) {
+        const lastLog = closedSessionLogThrottle.get(sessionId) || 0;
+        if (Date.now() - lastLog > 60000) {
+          closedSessionLogThrottle.set(sessionId, Date.now());
+          console.log(`🛑 [SESSION_CLOSED] Received GPS telemetry for manually stopped session ${sessionId}. Dropping trailing points (throttled 60s).`);
+          if (closedSessionLogThrottle.size > 500) {
+            const cutoff = Date.now() - 300000;
+            for (const [id, ts] of closedSessionLogThrottle.entries()) {
+              if (ts < cutoff) closedSessionLogThrottle.delete(id);
+            }
+          }
+        }
+        if (releaseSessionLock) await releaseSessionLock().catch(() => {});
+        return res.json({ 
+          success: true, 
+          message: 'Session already ended by employee.', 
+          sessionClosed: true, 
+          totalDistance: activeDoc.totalDistance || 0 
+        });
+      }
       activeDoc.isActive = true;
       activeDoc.autoClosed = false;
       activeDoc.lastActivity = new Date();
@@ -1089,22 +1112,42 @@ exports.getLiveEmployees = async (req, res) => {
     const empIds = scopedUsers.map(e => e._id);
 
     // Active tracking sessions — strictly authoritative on isActive: true
-    const locations = await LiveLocation.find({
+    const activeLocations = await LiveLocation.find({
       isActive: true,
       employee: { $in: empIds }
     }).populate('employee', 'name employeeId avatar department isOnline lastSeen');
 
-    // Enrich active locations with real-time verified today trajectory distance
+    const activeEmpIdSet = new Set(activeLocations.map(l => String(l.employee?._id || l.employee)));
+
+    // Also fetch today's completed/inactive sessions so employees who traveled today don't show 0 KM
     const today = getBusinessDate(new Date(), 'Asia/Kolkata');
     const todayStartMs = new Date(`${today}T00:00:00.000Z`).getTime();
+
+    const inactiveTodaySessions = await LiveLocation.find({
+      date: today,
+      isActive: false,
+      employee: { $in: empIds }
+    }).sort({ updatedAt: -1 }).populate('employee', 'name employeeId avatar department isOnline lastSeen');
+
+    const seenEmpIds = new Set();
+    const inactiveToInclude = [];
+    for (const sess of inactiveTodaySessions) {
+      const empIdStr = String(sess.employee?._id || sess.employee);
+      if (!activeEmpIdSet.has(empIdStr) && !seenEmpIds.has(empIdStr)) {
+        seenEmpIds.add(empIdStr);
+        inactiveToInclude.push(sess);
+      }
+    }
+
+    const locations = [...activeLocations, ...inactiveToInclude];
 
     for (let i = 0; i < locations.length; i++) {
       const loc = locations[i];
       let cleanKm = 0;
 
-      // Primary: Authoritative DistanceLedger ACCEPTED sum
+      // Primary: Authoritative DistanceLedger ACCEPTED + RECOVERED sum
       const ledgerAgg = await DistanceLedger.aggregate([
-        { $match: { sessionId: loc.sessionId, classification: 'ACCEPTED' } },
+        { $match: { sessionId: loc.sessionId, classification: { $in: ['ACCEPTED', 'RECOVERED'] } } },
         { $group: { _id: null, totalKm: { $sum: '$distanceKm' } } }
       ]);
 
@@ -1143,27 +1186,36 @@ exports.getLiveEmployees = async (req, res) => {
         }
         cleanKm = Math.round(todayCleanDistKm * 100) / 100;
       }
-      
-      loc.totalDistance = cleanKm;
-      loc.officialDistance = cleanKm;
+
+      const existingKm = Math.max(Number(loc.totalDistance) || 0, Number(loc.officialDistance) || 0);
+      const sessionKm = Math.round(Math.max(existingKm, cleanKm) * 100) / 100;
+
+      // Sum earlier today sessions
+      const empId = loc.employee?._id || loc.employee;
+      const earlierTodaySessions = await LiveLocation.find(
+        { employee: empId, date: today, sessionId: { $ne: loc.sessionId } },
+        { totalDistance: 1, officialDistance: 1 }
+      ).lean().catch(() => []);
+      const earlierKm = (earlierTodaySessions || []).reduce(
+        (sum, s) => sum + Math.max(Number(s.totalDistance) || 0, Number(s.officialDistance) || 0),
+        0
+      );
+
+      const finalKm = Math.round((sessionKm + earlierKm) * 100) / 100;
+      loc.totalDistance = finalKm;
+      loc.officialDistance = finalKm;
     }
 
-    const activeEmpIdSet = new Set(locations.map(l => String(l.employee?._id || l.employee)));
-
     // Auto-reconcile desynced User.isTracking flags
-    const employees = [];
     scopedUsers.forEach(u => {
       const isActuallyTracking = activeEmpIdSet.has(String(u._id));
       if (u.isTracking !== isActuallyTracking) {
         User.findByIdAndUpdate(u._id, { isTracking: isActuallyTracking }).catch(() => {});
         u.isTracking = isActuallyTracking;
       }
-      if (isActuallyTracking) {
-        employees.push(u);
-      }
     });
 
-    res.json({ success: true, employees, locations });
+    res.json({ success: true, employees: scopedUsers, locations });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1428,16 +1480,16 @@ exports.getLiveLocations = async (req, res) => {
       const latestCoord = session.coordinates[session.coordinates.length - 1] || {};
       let displayDistance = 0;
       const ledgerAgg = await DistanceLedger.aggregate([
-        { $match: { sessionId: session.sessionId, classification: 'ACCEPTED' } },
+        { $match: { sessionId: session.sessionId, classification: { $in: ['ACCEPTED', 'RECOVERED'] } } },
         { $group: { _id: null, totalKm: { $sum: '$distanceKm' } } }
       ]);
-      if (ledgerAgg && ledgerAgg.length > 0 && typeof ledgerAgg[0].totalKm === 'number' && ledgerAgg[0].totalKm > 0) {
-        displayDistance = Math.round(ledgerAgg[0].totalKm * 100) / 100;
-      } else {
-        const sessionState = await getSessionState(session.sessionId);
-        const sessionDist = sessionState?.totalDistance ?? session.totalDistance ?? 0;
-        displayDistance = Math.round(sessionDist * 100) / 100;
-      }
+      const ledgerKm = (ledgerAgg && ledgerAgg.length > 0 && typeof ledgerAgg[0].totalKm === 'number' && ledgerAgg[0].totalKm > 0)
+        ? Math.round(ledgerAgg[0].totalKm * 100) / 100
+        : 0;
+
+      const sessionState = await getSessionState(session.sessionId).catch(() => null);
+      const sessionDist = sessionState?.totalDistance ?? session.totalDistance ?? session.officialDistance ?? 0;
+      displayDistance = Math.round(Math.max(sessionDist, ledgerKm) * 100) / 100;
 
       // Calculate today's full cumulative accepted KM across all today's sessions for this employee
       const today = getBusinessDate(new Date(), 'Asia/Kolkata');
@@ -1447,7 +1499,7 @@ exports.getLiveLocations = async (req, res) => {
         {
           $match: {
             employee: session.employee._id,
-            classification: 'ACCEPTED',
+            classification: { $in: ['ACCEPTED', 'RECOVERED'] },
             toTimestamp: { $gte: new Date(todayStartMs) }
           }
         },
@@ -1456,7 +1508,7 @@ exports.getLiveLocations = async (req, res) => {
 
       let todayTotalKm = 0;
       if (empTodayLedgerAgg && empTodayLedgerAgg.length > 0 && typeof empTodayLedgerAgg[0].totalKm === 'number' && empTodayLedgerAgg[0].totalKm > 0) {
-        todayTotalKm = Math.round(empTodayLedgerAgg[0].totalKm * 100) / 100;
+        todayTotalKm = Math.round(Math.max(displayDistance, empTodayLedgerAgg[0].totalKm) * 100) / 100;
       } else {
         todayTotalKm = displayDistance;
       }

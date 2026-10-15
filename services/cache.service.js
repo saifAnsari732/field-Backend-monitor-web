@@ -192,11 +192,15 @@ const clearIdempotencyKey = async (sessionId, eventId) => {
 const liveCache = {
   get: getCache,
   set: (key, val, ttl = 60) => setCache(key, val, ttl),
+  del: deleteCache,
+  delete: deleteCache,
 };
 
 const geocodeCache = {
   get: getCache,
   set: (key, val, ttl = 86400) => setCache(key, val, ttl),
+  del: deleteCache,
+  delete: deleteCache,
 };
 
 module.exports = {

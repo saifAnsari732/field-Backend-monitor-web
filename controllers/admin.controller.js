@@ -633,10 +633,20 @@ exports.getTrackingHistory = async (req, res) => {
         { $group: { _id: null, totalKm: { $sum: '$distanceKm' } } }
       ]);
 
-      if (ledgerAgg && ledgerAgg.length > 0 && typeof ledgerAgg[0].totalKm === 'number' && ledgerAgg[0].totalKm > 0) {
+      if (s.manualAdjustmentReason) {
+        // If an explicit manual admin adjustment was performed, the session's totalDistance is authoritative
+        s.totalDistance = Number(s.totalDistance || s.officialDistance || 0);
+        s.officialDistance = Number(s.officialDistance || s.totalDistance || 0);
+      } else if (ledgerAgg && ledgerAgg.length > 0 && typeof ledgerAgg[0].totalKm === 'number' && ledgerAgg[0].totalKm > 0) {
         const verifiedKm = Math.round(ledgerAgg[0].totalKm * 100) / 100;
-        s.totalDistance = verifiedKm;
-        s.officialDistance = verifiedKm;
+        const manualAdded = Number(s.manualDistanceAdded || 0);
+        const finalKm = Math.round((verifiedKm + manualAdded) * 100) / 100;
+        s.totalDistance = Math.max(Number(s.totalDistance || 0), finalKm);
+        s.officialDistance = Math.max(Number(s.officialDistance || 0), finalKm);
+      } else if (Number(s.manualDistanceAdded || 0) > 0 || Number(s.totalDistance || 0) > 0) {
+        // Keep existing totalDistance / officialDistance when manual credit exists or when distance is set
+        s.totalDistance = Number(s.totalDistance || s.officialDistance || 0);
+        s.officialDistance = Number(s.officialDistance || s.totalDistance || 0);
       } else if ((!s.totalDistance || s.totalDistance === 0) && Array.isArray(s.coordinates) && s.coordinates.length >= 2) {
         try {
           const recalculated = await trackingController.recalculateSessionFromPoints(s.sessionId, s.date, s._id);
@@ -776,28 +786,81 @@ exports.adjustDistance = async (req, res) => {
     }
 
     const currentDist = Number(session.totalDistance || session.officialDistance || 0);
-    const addedKm = mode === 'add' ? kmValue : Math.max(0, kmValue - currentDist);
-    const newTotalDist = Math.round((mode === 'add' ? currentDist + kmValue : kmValue) * 100) / 100;
+    let newTotalDist = 0;
+    let deltaKm = 0;
+
+    if (mode === 'deduct' || mode === 'subtract') {
+      newTotalDist = Math.max(0, Math.round((currentDist - kmValue) * 100) / 100);
+      deltaKm = -(currentDist - newTotalDist);
+    } else if (mode === 'set') {
+      newTotalDist = Math.max(0, Math.round(kmValue * 100) / 100);
+      deltaKm = newTotalDist - currentDist;
+    } else {
+      // mode === 'add' (default)
+      newTotalDist = Math.round((currentDist + kmValue) * 100) / 100;
+      deltaKm = kmValue;
+    }
 
     session.totalDistance = newTotalDist;
     session.officialDistance = newTotalDist;
     session.acceptedDistance = newTotalDist;
-    session.manualDistanceAdded = (session.manualDistanceAdded || 0) + addedKm;
+    session.manualDistanceAdded = Math.max(0, (session.manualDistanceAdded || 0) + deltaKm);
     if (reason) session.manualAdjustmentReason = reason;
     await session.save();
 
-    // Update or sync Attendance record for this employee and date
+    // Update or sync Attendance record for this employee and date (upsert if needed)
     await Attendance.findOneAndUpdate(
       { employee: targetEmpId, date: targetDate },
       {
-        totalDistanceTraveled: newTotalDist,
-        officialDistance: newTotalDist,
-      }
+        $set: {
+          totalDistanceTraveled: newTotalDist,
+          officialDistance: newTotalDist,
+        },
+        $setOnInsert: {
+          organizationId: session.organizationId || req.user?.organizationId,
+          status: 'present',
+        }
+      },
+      { upsert: true, new: true }
     ).catch(() => {});
+
+    // Update User model directly so employee profile & DB reflect adjusted distance
+    await User.findByIdAndUpdate(targetEmpId, {
+      $set: {
+        totalDistance: newTotalDist,
+        totalDistanceTraveled: newTotalDist,
+      }
+    }).catch(() => {});
+
+    // Record manual adjustment entry in DistanceLedger as ACCEPTED segment so DistanceLedger aggregations reflect this KM
+    try {
+      const { DistanceLedger } = require('../models/index');
+      const now = new Date();
+      await DistanceLedger.create({
+        organizationId: session.organizationId || req.user?.organizationId,
+        employee: targetEmpId,
+        sessionId: session.sessionId,
+        fromEventId: `ADJUST_FROM_${Date.now()}`,
+        toEventId: `ADJUST_TO_${Date.now()}`,
+        fromTimestamp: now,
+        toTimestamp: now,
+        fromLat: session.coordinates?.[session.coordinates.length - 1]?.lat || 0,
+        fromLng: session.coordinates?.[session.coordinates.length - 1]?.lng || 0,
+        toLat: session.coordinates?.[session.coordinates.length - 1]?.lat || 0,
+        toLng: session.coordinates?.[session.coordinates.length - 1]?.lng || 0,
+        distanceMeters: Math.round(deltaKm * 1000),
+        distanceKm: Math.round(deltaKm * 100) / 100,
+        classification: 'ACCEPTED',
+        reason: reason || 'MANUAL_ADMIN_ADJUSTMENT',
+      });
+    } catch (ledgerErr) {
+      console.warn('Could not create DistanceLedger record for adjustment:', ledgerErr.message);
+    }
 
     // Create ActivityLog entry
     const empUser = await User.findById(targetEmpId).select('name');
     await ActivityLog.create({
+      organizationId: session.organizationId || req.user?.organizationId,
       employee: req.user._id,
       action: 'KM_ADJUSTMENT',
       description: `Adjusted distance for ${empUser?.name || 'Employee'}: set to ${newTotalDist} KM (${mode === 'add' ? '+' : ''}${kmValue} KM). Reason: ${reason || 'Admin credit'}`
@@ -805,7 +868,9 @@ exports.adjustDistance = async (req, res) => {
 
     // Clear live cache so dashboard reflects new KM instantly
     const cacheKey = `admin_dashboard_stats_${req.user?.organizationId?._id || req.user?.organizationId || 'super'}`;
-    await liveCache.del(cacheKey).catch(() => {});
+    if (liveCache?.del) {
+      await liveCache.del(cacheKey).catch(() => {});
+    }
 
     res.json({
       success: true,
