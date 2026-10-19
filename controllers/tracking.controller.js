@@ -1120,7 +1120,7 @@ exports.getLiveEmployees = async (req, res) => {
     }
 
     const scopedUsers = await User.find(userScope)
-      .select('name employeeId department avatar isTracking isOnline lastSeen organizationId');
+      .select('name employeeId department avatar isTracking isOnline lastSeen organizationId totalDistance totalDistanceToday');
     const empIds = scopedUsers.map(e => e._id);
 
     // Active tracking sessions — strictly authoritative on isActive: true
@@ -1241,16 +1241,34 @@ exports.getLiveEmployees = async (req, res) => {
       loc.officialDistance = finalKm;
     }
 
-    // Auto-reconcile desynced User.isTracking flags
-    scopedUsers.forEach(u => {
-      const isActuallyTracking = activeEmpIdSet.has(String(u._id));
-      if (u.isTracking !== isActuallyTracking) {
-        User.findByIdAndUpdate(u._id, { isTracking: isActuallyTracking }).catch(() => {});
-        u.isTracking = isActuallyTracking;
+    // Map distance by employee ID for fast O(1) enrichment
+    const locDistMap = {};
+    locations.forEach(loc => {
+      const eid = String(loc.employee?._id || loc.employee);
+      if (eid) {
+        locDistMap[eid] = typeof loc.totalDistance === 'number' ? loc.totalDistance : (Number(loc.officialDistance) || 0);
       }
     });
 
-    res.json({ success: true, employees: scopedUsers, locations });
+    // Auto-reconcile desynced User.isTracking flags and attach live distance
+    const enrichedUsers = scopedUsers.map(u => {
+      const uObj = u.toObject ? u.toObject() : { ...u };
+      const isActuallyTracking = activeEmpIdSet.has(String(u._id));
+      if (u.isTracking !== isActuallyTracking) {
+        User.findByIdAndUpdate(u._id, { isTracking: isActuallyTracking }).catch(() => {});
+        uObj.isTracking = isActuallyTracking;
+      }
+      const liveKm = locDistMap[String(u._id)];
+      const authoritativeKm = (typeof liveKm === 'number' && liveKm > 0)
+        ? liveKm
+        : (Number(uObj.totalDistanceToday) || Number(uObj.totalDistance) || 0);
+
+      uObj.todayKm = authoritativeKm;
+      uObj.totalDistanceToday = authoritativeKm;
+      return uObj;
+    });
+
+    res.json({ success: true, employees: enrichedUsers, locations });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

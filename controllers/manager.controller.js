@@ -2,10 +2,27 @@ const { Meeting, Expense, Attendance, LiveLocation, Leave, Task } = require('../
 const User = require('../models/User.model');
 
 
+// Helper to build the unified team filter for a manager (supports manager, managerId, and assignedEmployees array)
+function getTeamFilter(user) {
+  const orConditions = [
+    { manager: user._id },
+    { managerId: user._id }
+  ];
+  if (Array.isArray(user.assignedEmployees) && user.assignedEmployees.length > 0) {
+    const assignedIds = user.assignedEmployees
+      .map(e => (e && e._id ? e._id : e))
+      .filter(Boolean);
+    if (assignedIds.length > 0) {
+      orConditions.push({ _id: { $in: assignedIds } });
+    }
+  }
+  return { $or: orConditions };
+}
+
 // ─── Manager Dashboard Stats ──────────────────────────────────────────────────
 exports.getDashboardStats = async (req, res) => {
   try {
-    const myTeamFilter = { manager: req.user._id };
+    const myTeamFilter = getTeamFilter(req.user);
     const teamMembers = await User.find(myTeamFilter).select('_id');
     const teamIds = teamMembers.map(emp => emp._id);
     const today = new Date().toISOString().slice(0, 10);
@@ -51,13 +68,15 @@ exports.getDashboardStats = async (req, res) => {
 exports.getMyTeam = async (req, res) => {
   try {
     const { page = 1, limit = 20, search } = req.query;
-    const filter = { manager: req.user._id };
+    const filter = getTeamFilter(req.user);
     if (search) {
-      filter.$or = [
+      const searchOr = [
         { name: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } },
         { employeeId: { $regex: search, $options: 'i' } }
       ];
+      filter.$and = [{ $or: filter.$or }, { $or: searchOr }];
+      delete filter.$or;
     }
     const employees = await User.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(+limit);
     const total = await User.countDocuments(filter);
@@ -69,7 +88,7 @@ exports.getMyTeam = async (req, res) => {
 exports.getTeamMeetings = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, employeeId } = req.query;
-    const teamMembers = await User.find({ manager: req.user._id }).select('_id');
+    const teamMembers = await User.find(getTeamFilter(req.user)).select('_id');
     const teamIds = teamMembers.map(emp => emp._id);
     const filter = { employee: { $in: teamIds } };
     if (status) filter.status = status;
@@ -84,7 +103,7 @@ exports.getTeamMeetings = async (req, res) => {
 exports.getTeamExpenses = async (req, res) => {
   try {
     const { page = 1, limit = 20, status, employeeId } = req.query;
-    const teamMembers = await User.find({ manager: req.user._id }).select('_id');
+    const teamMembers = await User.find(getTeamFilter(req.user)).select('_id');
     const teamIds = teamMembers.map(emp => emp._id);
     const filter = { employee: { $in: teamIds } };
     if (status) filter.status = status;
@@ -99,7 +118,7 @@ exports.getTeamExpenses = async (req, res) => {
 exports.getTeamAttendance = async (req, res) => {
   try {
     const { date } = req.query;
-    const teamMembers = await User.find({ manager: req.user._id }).select('_id');
+    const teamMembers = await User.find(getTeamFilter(req.user)).select('_id');
     const teamIds = teamMembers.map(emp => emp._id);
     const filter = { employee: { $in: teamIds } };
     if (date) filter.date = date;
@@ -112,7 +131,7 @@ exports.getTeamAttendance = async (req, res) => {
 exports.getTeamTrackingHistory = async (req, res) => {
   try {
     const { date, employeeId, page = 1, limit = 50 } = req.query;
-    const teamMembers = await User.find({ manager: req.user._id }).select('_id');
+    const teamMembers = await User.find(getTeamFilter(req.user)).select('_id');
     const teamIds = teamMembers.map(emp => emp._id);
     const filter = { employee: { $in: teamIds } };
     if (date) {

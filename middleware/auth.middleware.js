@@ -3,7 +3,7 @@ const User = require('../models/User.model');
 
 const ACCESS_TOKEN_SECRET = process.env.JWT_SECRET || 'your_super_secret_jwt_key_here_change_in_production';
 const REFRESH_TOKEN_SECRET = process.env.JWT_REFRESH_SECRET || (ACCESS_TOKEN_SECRET + '_refresh_sec');
-const ACCESS_TOKEN_EXPIRY = process.env.JWT_EXPIRE || '2h';
+const ACCESS_TOKEN_EXPIRY = process.env.JWT_EXPIRE || '30d';
 const REFRESH_TOKEN_EXPIRY = process.env.JWT_REFRESH_EXPIRE || '30d';
 
 /**
