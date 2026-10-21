@@ -154,6 +154,9 @@ exports.getConsolidatedReport = async (req, res) => {
     const completedMeetings = meetings.filter((m) => m.status === 'completed').length;
     const completedTasks = tasks.filter((t) => t.status === 'completed').length;
     const daysPresent = attendances.filter((a) => a.status === 'present').length;
+    const halfDays = attendances.filter((a) => a.status === 'half-day').length;
+    const absentDays = attendances.filter((a) => a.status === 'absent').length;
+    const totalWorkHours = parseFloat(attendances.reduce((a, b) => a + (Number(b.totalWorkHours) || 0), 0).toFixed(1));
 
     res.json({
       success: true,
@@ -175,6 +178,9 @@ exports.getConsolidatedReport = async (req, res) => {
           completedTasks,
           totalLeads: leads.length,
           daysPresent,
+          halfDays,
+          absentDays,
+          totalWorkHours,
           totalAttendances: attendances.length,
         },
         dailyDistances,

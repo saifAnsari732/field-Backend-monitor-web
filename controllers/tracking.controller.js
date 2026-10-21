@@ -287,7 +287,7 @@ exports.updateLocation = async (req, res) => {
     }
 
     if (!activeDoc.isActive) {
-      if (activeDoc.endTime && !activeDoc.autoClosed) {
+      if (activeDoc.manuallyStopped === true) {
         const lastLog = closedSessionLogThrottle.get(sessionId) || 0;
         if (Date.now() - lastLog > 60000) {
           closedSessionLogThrottle.set(sessionId, Date.now());
@@ -1508,19 +1508,12 @@ exports.reconcileAllActiveSessions = async () => {
       const lastCoordTs = lastCoord?.timestamp ? new Date(lastCoord.timestamp).getTime() : 0;
       const lastActMs = s.lastActivity ? new Date(s.lastActivity).getTime() : 0;
 
-      if (lastActMs < fifteenMinAgoMs || lastCoordTs < fifteenMinAgoMs) {
+      if (lastActMs < fifteenMinAgoMs) {
         const updateSet = {
           lastActivity: now,
           autoClosed: false,
           manuallyStopped: false
         };
-        // Update the last coordinate's timestamp to now (0 meters added, preserves identical position)
-        // so remote legacy 1-hour cron never auto-stops stationary field workers!
-        const fullDoc = await LiveLocation.findById(s._id, { 'coordinates._id': 1 }).lean();
-        const coordCount = fullDoc?.coordinates?.length || 0;
-        if (coordCount > 0) {
-          updateSet[`coordinates.${coordCount - 1}.timestamp`] = now;
-        }
 
         await LiveLocation.updateOne(
           { _id: s._id },
@@ -1595,14 +1588,15 @@ exports.getLiveLocations = async (req, res) => {
     const orgEmployees = await User.find(userScope).select('_id');
     const empIds = orgEmployees.map(e => e._id);
 
-    // Get active tracking sessions within last 14h cutoff (avoids timezone date dropping)
+    // Get active tracking sessions within last 14h cutoff OR any non-manually-stopped session today (avoids stationary/timezone dropping)
+    const today = getBusinessDate(new Date(), 'Asia/Kolkata');
     const cutoff = new Date(Date.now() - 14 * 60 * 60 * 1000);
     const activeSessions = await LiveLocation.find({
-      isActive: true,
       employee: { $in: empIds },
       $or: [
-        { lastActivity: { $gte: cutoff } },
-        { lastActivity: null, updatedAt: { $gte: cutoff } }
+        { isActive: true, lastActivity: { $gte: cutoff } },
+        { isActive: true, lastActivity: null, updatedAt: { $gte: cutoff } },
+        { date: today, manuallyStopped: { $ne: true } }
       ]
     }).populate('employee', 'name employeeId avatar department organizationId isOnline lastSeen');
 
@@ -1662,11 +1656,18 @@ exports.getLiveLocations = async (req, res) => {
         department: session.employee.department,
         lat: latestCoord.lat,
         lng: latestCoord.lng,
-        speed: latestCoord.speed || 0,
-        address: latestCoord.address,
+        speed: (session.motionState === 'STATIONARY') ? 0 : (latestCoord.speed || 0),
+        address: latestCoord.address || session.currentAddress,
         totalDistance: todayTotalKm,
+        totalDistanceToday: todayTotalKm,
+        todayKm: todayTotalKm,
+        officialDistance: todayTotalKm,
         sessionTotalDistance: displayDistance,
         sessionId: session.sessionId,
+        motionState: session.motionState || 'STATIONARY',
+        isActive: true,
+        isTracking: true,
+        isOnline: session.employee?.isOnline ?? true,
         startTime: session.startTime,
         updatedAt: latestCoord.timestamp || session.updatedAt,
       };
