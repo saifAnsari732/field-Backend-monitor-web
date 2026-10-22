@@ -120,7 +120,7 @@ exports.getDashboardStats = async (req, res) => {
       User.countDocuments({ role: { $in: ['EMPLOYEE', 'employee', 'FIELD_EXECUTIVE'] }, isApproved: true, ...userFilter }),
       User.countDocuments({ role: { $in: ['MANAGER', 'manager'] }, isApproved: true, ...userFilter }),
       User.countDocuments({ role: { $nin: ['SUPER_ADMIN', 'SUPERADMIN'] }, isOnline: true, ...userFilter }),
-      User.countDocuments({ role: { $nin: ['SUPER_ADMIN', 'SUPERADMIN'] }, isTracking: true, ...userFilter }),
+      LiveLocation.distinct('employee', { date: today, isActive: true, manuallyStopped: { $ne: true }, autoClosed: { $ne: true }, ...(isSuperAdmin ? {} : { employee: { $in: empIds } }) }).then(res => res.length),
       Meeting.countDocuments(isSuperAdmin ? {} : { employee: { $in: empIds } }),
       Meeting.countDocuments(isSuperAdmin ? { date: { $gte: new Date(today) } } : { employee: { $in: empIds }, date: { $gte: new Date(today) } }),
       Expense.countDocuments(isSuperAdmin ? { status: 'pending' } : { employee: { $in: empIds }, status: 'pending' }),
@@ -354,14 +354,21 @@ exports.getAllEmployees = async (req, res) => {
       const att = attMap.get(empIdStr);
       const live = liveMap.get(empIdStr);
 
-      const isLive = live?.isActive === true || empObj.isTracking === true;
+      const lastPingTime = live?.lastActivity || live?.updatedAt || empObj.lastSeen;
+      const pingAgeMs = lastPingTime ? (Date.now() - new Date(lastPingTime).getTime()) : Infinity;
+      const isFresh = pingAgeMs < 45 * 60 * 1000;
+      const isLive = Boolean(
+        live &&
+        live.isActive === true &&
+        live.manuallyStopped !== true &&
+        live.autoClosed !== true &&
+        isFresh
+      );
       const authoritativeKm = Number(live?.officialDistance) ||
         Number(live?.totalDistance) ||
         Number(att?.totalDistanceTraveled) ||
         (empSessionsDistMap.get(empIdStr) || 0);
       const todayKm = Math.round(authoritativeKm * 100) / 100;
-
-      const lastPingTime = live?.lastActivity || live?.updatedAt || att?.checkIn || empObj.lastSeen || empObj.updatedAt;
 
       return {
         ...empObj,
@@ -371,7 +378,7 @@ exports.getAllEmployees = async (req, res) => {
         totalDistanceToday: todayKm,
         lastPing: lastPingTime,
         lastCheckIn: att?.checkIn || empObj.lastCheckIn,
-        attendanceStatus: att?.status || (isLive ? 'present' : 'absent'),
+        attendanceStatus: att?.status || (att?.checkIn ? 'present' : 'absent'),
         currentAddress: live?.currentAddress || live?.endAddress || live?.startAddress || empObj.address
       };
     });
