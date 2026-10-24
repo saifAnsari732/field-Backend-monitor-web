@@ -911,10 +911,10 @@ exports.stopTracking = async (req, res) => {
     session.rawGpsDistance = gpsKm;
     session.totalDistance = finalOfficialKm;
     session.officialDistance = finalOfficialKm;
-    if (toleranceKm > 0) {
-      session.manualDistanceAdded = Math.round(((Number(session.manualDistanceAdded) || 0) + toleranceKm) * 100) / 100;
-      session.manualAdjustmentReason = `${TOLERANCE_PCT}% Punch Out tolerance: GPS ${gpsKm} km + ${toleranceKm} km = ${finalOfficialKm} km`;
-    }
+    session.manualDistanceAdded = toleranceKm;
+    session.manualAdjustmentReason = toleranceKm > 0
+      ? `${TOLERANCE_PCT}% Punch Out road compensation: GPS ${gpsKm} km + ${toleranceKm} km = ${finalOfficialKm} km`
+      : (session.manualAdjustmentReason || 'Pure GPS distance');
 
     // Get end address from last coordinate
     if (session.coordinates && session.coordinates.length > 0) {
@@ -963,6 +963,9 @@ exports.stopTracking = async (req, res) => {
         status: 'present'
       });
     }
+
+    // Sync User.totalDistanceToday with final authoritative distance (including 10% road compensation)
+    await User.findByIdAndUpdate(req.user._id, { totalDistanceToday: Math.round(totalDist * 100) / 100, isTracking: false });
 
     await ActivityLog.create({
       employee: req.user._id, action: 'TRACKING_STOP',
