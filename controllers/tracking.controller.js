@@ -824,8 +824,8 @@ exports.stopTracking = async (req, res) => {
     );
     const gpsKm = Math.round(baseGpsKm * 100) / 100;
 
-    // Zero extra tolerance addition — strict 1:1 GPS distance policy
-    const TOLERANCE_PCT = Number(process.env.PUNCH_OUT_TOLERANCE_PCT ?? 0);
+    // Automatic 10% punch-out road curvature & network compensation
+    const TOLERANCE_PCT = Number(process.env.PUNCH_OUT_TOLERANCE_PCT ?? 10);
     const toleranceKm = (gpsKm > 0 && TOLERANCE_PCT > 0) ? Math.round(gpsKm * (TOLERANCE_PCT / 100) * 100) / 100 : 0;
     const finalOfficialKm = Math.round((gpsKm + toleranceKm) * 100) / 100;
 
