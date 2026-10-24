@@ -23,6 +23,84 @@ function getBusinessDate(date = new Date(), timeZone = 'Asia/Kolkata') {
 // In-memory throttle for closed session drop logs (max 1 log per 60s per session)
 const closedSessionLogThrottle = new Map();
 
+/**
+ * AGTRIE-X v16 Temporal & Spatial Interval Non-Overlap Invariant Engine
+ * Completely prevents duplicate gap replays (e.g. 150 km counted twice).
+ * An accepted segment MUST NOT overlap with an existing accepted segment in the same session:
+ * 1. Time overlap: intersection([fromT, toT], [existing.fromT, existing.toT]) > 30% of interval
+ * 2. Spatial vector corridor: fromPoint and toPoint both within 2.5 km of an existing large gap
+ */
+async function isDuplicateGapOverlapping(sessionId, fromTime, toTime, fromLat, fromLng, toLat, toLng, gapDistKm, inMemorySegments = []) {
+  if (gapDistKm < 1.0) return false;
+
+  const fromMs = new Date(fromTime).getTime();
+  const toMs = new Date(toTime).getTime();
+  const durationMs = toMs - fromMs;
+  if (durationMs <= 0) return true;
+
+  // 1. Check in-memory batch segments
+  for (const s of inMemorySegments) {
+    if (s.classification !== 'ACCEPTED' && s.classification !== 'RECOVERED') continue;
+    if (s.distanceKm < 1.0) continue;
+
+    const sFromMs = new Date(s.fromTimestamp).getTime();
+    const sToMs = new Date(s.toTimestamp).getTime();
+    const overlapStart = Math.max(fromMs, sFromMs);
+    const overlapEnd = Math.min(toMs, sToMs);
+    const overlapDuration = overlapEnd - overlapStart;
+
+    if (overlapDuration > 0 && (overlapDuration / Math.min(durationMs, (sToMs - sFromMs))) > 0.3) {
+      return true;
+    }
+
+    if (s.fromLat && s.toLat && fromLat && toLat) {
+      const dFrom = haversineMeters(fromLat, fromLng, s.fromLat, s.fromLng);
+      const dTo = haversineMeters(toLat, toLng, s.toLat, s.toLng);
+      if (dFrom < 2500 && dTo < 2500 && Math.abs(s.distanceKm - gapDistKm) < 10) {
+        return true;
+      }
+    }
+  }
+
+  // 2. Check MongoDB DistanceLedger for this session
+  try {
+    const overlappingLedgers = await DistanceLedger.find({
+      sessionId,
+      classification: { $in: ['ACCEPTED', 'RECOVERED'] },
+      distanceKm: { $gt: 1.0 },
+      fromTimestamp: { $lte: new Date(toMs) },
+      toTimestamp: { $gte: new Date(fromMs) }
+    }).select('fromTimestamp toTimestamp distanceKm fromLat fromLng toLat toLng').lean();
+
+    for (const l of overlappingLedgers) {
+      const lFromMs = new Date(l.fromTimestamp).getTime();
+      const lToMs = new Date(l.toTimestamp).getTime();
+      const overlapStart = Math.max(fromMs, lFromMs);
+      const overlapEnd = Math.min(toMs, lToMs);
+      const overlapDuration = overlapEnd - overlapStart;
+      const minDuration = Math.min(durationMs, (lToMs - lFromMs));
+
+      if (overlapDuration > 0 && minDuration > 0 && (overlapDuration / minDuration) > 0.3) {
+        console.log(`⚠️ [GAP_COLLISION_BLOCKED] Time overlap detected (${(overlapDuration/60000).toFixed(1)}m) for session ${sessionId} (${gapDistKm.toFixed(1)} km). Ignored.`);
+        return true;
+      }
+
+      if (l.fromLat && l.toLat && fromLat && toLat) {
+        const dFrom = haversineMeters(fromLat, fromLng, l.fromLat, l.fromLng);
+        const dTo = haversineMeters(toLat, toLng, l.toLat, l.toLng);
+        if (dFrom < 2500 && dTo < 2500) {
+          console.log(`⚠️ [GAP_COLLISION_BLOCKED] Spatial corridor duplicate (${dFrom.toFixed(0)}m / ${dTo.toFixed(0)}m) for session ${sessionId} (${gapDistKm.toFixed(1)} km). Ignored.`);
+          return true;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error in isDuplicateGapOverlapping:', err.message);
+  }
+
+  return false;
+}
+
 // @desc Start tracking session
 exports.startTracking = async (req, res) => {
   try {
@@ -1456,43 +1534,49 @@ exports.reconcileAllActiveSessions = async () => {
     const today = getBusinessDate(new Date(), 'Asia/Kolkata');
     const now = new Date();
 
-    // 1. Staleness Guardian: Gracefully auto-close active sessions that have had NO GPS points or heartbeat for > 2 hours.
-    // Preserves distance 100% in DistanceLedger & session, prevents phantom "Tracking ON" after employees leave work.
-    const twoHoursAgoMs = now.getTime() - 2 * 60 * 60 * 1000;
-    const activeToday = await LiveLocation.find(
-      { date: today, isActive: true },
-      { _id: 1, sessionId: 1, employee: 1, totalDistance: 1, manualDistanceAdded: 1, lastActivity: 1, coordinates: { $slice: -1 } }
+    // 1. Permanent Shift Guardian (Zero Data Loss Policy):
+    // Sessions remain 100% active for the entire workday until employee explicitly taps Punch Out.
+    // Auto-heals any session closed by false timeout or rogue process today.
+    const autoClosedToday = await LiveLocation.find(
+      { date: today, isActive: false, manuallyStopped: { $ne: true } },
+      { _id: 1, sessionId: 1, employee: 1, totalDistance: 1, manualDistanceAdded: 1, lastActivity: 1 }
     ).lean();
 
-    for (const s of activeToday) {
-      const lastCoord = (s.coordinates && s.coordinates.length > 0) ? s.coordinates[0] : null;
-      const lastCoordMs = lastCoord?.timestamp ? new Date(lastCoord.timestamp).getTime() : 0;
-      const lastActMs = s.lastActivity ? new Date(s.lastActivity).getTime() : 0;
-      const mostRecentActivityMs = Math.max(lastCoordMs, lastActMs);
+    for (const s of autoClosedToday) {
+      const explicitManualStop = await ActivityLog.exists({
+        action: 'TRACKING_STOP',
+        'metadata.sessionId': s.sessionId
+      });
 
-      if (mostRecentActivityMs > 0 && mostRecentActivityMs < twoHoursAgoMs) {
-        const endTime = new Date(mostRecentActivityMs);
+      if (!explicitManualStop) {
         await LiveLocation.updateOne(
           { _id: s._id },
           {
             $set: {
-              isActive: false,
-              autoClosed: true,
-              endTime: endTime
-            }
+              isActive: true,
+              autoClosed: false,
+              manuallyStopped: false,
+              lastActivity: new Date()
+            },
+            $unset: { endTime: 1, autoStoppedAt: 1 }
           }
         ).catch(() => {});
 
         if (s.employee) {
-          await User.findByIdAndUpdate(s.employee, { isTracking: false, isOnline: false }).catch(() => {});
+          await User.findByIdAndUpdate(s.employee, { isTracking: true, isOnline: true }).catch(() => {});
           await Attendance.findOneAndUpdate(
-            { employee: s.employee, date: today, checkOut: null },
-            { $set: { checkOut: endTime } }
+            { employee: s.employee, date: today },
+            { $unset: { checkOut: 1, punchOutTime: 1 } }
           ).catch(() => {});
         }
-        console.log(`⏱️ [SENTINEL_MONITOR_BACK] Inactive session ${s.sessionId} gracefully auto-closed after 2+ hours silence.`);
+        console.log(`🛡️ [SENTINEL_GUARDIAN] Auto-restored session ${s.sessionId} for employee ${s.employee} (Immortal Shift Policy)`);
       }
     }
+
+    const activeToday = await LiveLocation.find(
+      { date: today, isActive: true },
+      { _id: 1, sessionId: 1, employee: 1, totalDistance: 1, manualDistanceAdded: 1, lastActivity: 1, coordinates: { $slice: -1 } }
+    ).lean();
 
     // 3. Reconcile DistanceLedger KM for all active sessions today
     for (const s of activeToday) {
@@ -1557,21 +1641,14 @@ exports.getLiveLocations = async (req, res) => {
     const orgEmployees = await User.find(userScope).select('_id');
     const empIds = orgEmployees.map(e => e._id);
 
-    // Get active tracking sessions within last 45m active window today
+    // All today's active sessions remain visible on Live Map all day (Immortal Shift Policy)
     const today = getBusinessDate(new Date(), 'Asia/Kolkata');
-    const cutoff = new Date(Date.now() - 45 * 60 * 1000);
     const activeSessions = await LiveLocation.find({
       employee: { $in: empIds },
       date: today,
       isActive: true,
       manuallyStopped: { $ne: true },
-      autoClosed: { $ne: true },
-      $or: [
-        { lastActivity: { $gte: cutoff } },
-        { 'coordinates.timestamp': { $gte: cutoff } },
-        { updatedAt: { $gte: cutoff } }
-      ]
-    }).populate('employee', 'name employeeId avatar department organizationId isOnline lastSeen');
+    })
 
     // Format for frontend
     const rawLocations = await Promise.all(activeSessions.map(async (session) => {
