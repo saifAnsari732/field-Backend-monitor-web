@@ -892,6 +892,9 @@ exports.stopTracking = async (req, res) => {
     const cachedState = await getSessionState(effectiveSessionId);
     const redisTotalDist = cachedState ? cachedState.totalDistance : null;
 
+    // Manual stop is authoritative: Always end shift immediately without suppression
+    session.autoClosed = false;
+    session.manuallyStopped = true;
     session.isActive = false;
     session.endTime = new Date();
 
@@ -929,7 +932,7 @@ exports.stopTracking = async (req, res) => {
     // Ensure all active sessions for this employee are closed
     await LiveLocation.updateMany(
       { employee: req.user._id, isActive: true },
-      { $set: { isActive: false, endTime: new Date() } }
+      { $set: { isActive: false, autoClosed: false, manuallyStopped: true, endTime: new Date() } }
     );
 
     // Invalidate live location caches so dashboard immediately removes the stopped employee
@@ -1546,9 +1549,23 @@ exports.reconcileAllActiveSessions = async () => {
     ).lean();
 
     for (const s of autoClosedToday) {
+      // Strict Manual Punch Out Guard: If employee manually stopped or clocked out, NEVER restore!
+      if (s.manuallyStopped === true) continue;
+
+      const punchedOutAttendance = await Attendance.exists({
+        employee: s.employee,
+        date: today,
+        checkOut: { $exists: true, $ne: null }
+      });
+      if (punchedOutAttendance) {
+        await LiveLocation.updateOne({ _id: s._id }, { $set: { manuallyStopped: true, isActive: false } }).catch(() => {});
+        continue;
+      }
+
       const explicitManualStop = await ActivityLog.exists({
-        action: 'TRACKING_STOP',
-        'metadata.sessionId': s.sessionId
+        employee: s.employee,
+        action: { $in: ['TRACKING_STOP', 'CHECK_OUT'] },
+        createdAt: { $gte: new Date(`${today}T00:00:00.000Z`) }
       });
 
       if (!explicitManualStop) {
