@@ -285,18 +285,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
     }
     */
 
-    // ── Auto-Stop Inactive Sessions Cron (non-overlapping, every 5 min) ──────
-    try {
-      const { autoStopInactiveSessions } = require('./controllers/tracking.controller');
-      setInterval(() => {
-        autoStopInactiveSessions(io).catch((e) =>
-          console.error('[cron] autoStop uncaught error:', e.message)
-        );
-      }, 5 * 60 * 1000);
-      console.log('⏰ Auto-stop inactive sessions cron started (5-min interval, 14h threshold).');
-    } catch (err) {
-      console.error('Failed to start auto-stop cron:', err.message);
-    }
+    // Auto-stop cron permanently disabled - zero data loss policy
   })
   .catch(err => console.error('❌ MongoDB error:', err));
 
