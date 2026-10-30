@@ -184,6 +184,15 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ansarisaifuddin732_db
   .then(async () => {
     console.log('✅ MongoDB connected');
 
+    // ── Start Autonomous Sentinel Guardian & 1-Day Rollover Cron ──
+    try {
+      const { initCronJobs } = require('./services/cron.service');
+      initCronJobs(io);
+      console.log('🛡️ [SENTINEL] Sentinel Guardian initialized on port 5001');
+    } catch (cronInitErr) {
+      console.error('Failed to init cron jobs:', cronInitErr.message);
+    }
+
     // ── Reset all stuck online status on startup ──────────────────────────────
     try {
       const User = require('./models/User.model');
