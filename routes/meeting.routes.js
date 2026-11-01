@@ -1,9 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { protect, authorize } = require('../middleware/auth.middleware');
+const { protect, authorize, requireActivePlan } = require('../middleware/auth.middleware');
 const ac = require('../controllers/admin.controller');
-router.post('/', protect, ac.createMeeting);
-router.get('/my', protect, ac.getMyMeetings);
-router.put('/:id', protect, ac.updateMeeting);
-router.get('/all', protect, authorize('admin', 'hr'), ac.getAllMeetings);
+
+router.use(protect, requireActivePlan);
+
+router.post('/', ac.createMeeting);
+router.get('/my', ac.getMyMeetings);
+router.put('/:id', ac.updateMeeting);
+router.get('/all', authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), ac.getAllMeetings);
+
 module.exports = router;

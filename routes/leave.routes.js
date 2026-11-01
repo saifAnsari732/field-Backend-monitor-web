@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const leaveController = require('../controllers/leave.controller');
-const { protect, authorize } = require('../middleware/auth.middleware');
+const { protect, authorize, requireActivePlan } = require('../middleware/auth.middleware');
 
-router.use(protect);
+router.use(protect, requireActivePlan);
 
 router.post('/apply', leaveController.applyLeave);
 router.get('/my', leaveController.getMyLeaves);

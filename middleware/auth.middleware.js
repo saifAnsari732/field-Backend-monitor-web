@@ -93,7 +93,11 @@ const protect = async (req, res, next) => {
     }
 
     req.user = user;
-    req.organizationId = user.organizationId?._id || user.organizationId || null;
+    const isSuperAdmin = ['SUPER_ADMIN', 'SUPERADMIN'].includes((user.role || '').toUpperCase());
+    const headerOrgId = req.headers['x-organization-id'];
+    req.organizationId = (isSuperAdmin && headerOrgId)
+      ? headerOrgId
+      : (user.organizationId?._id || user.organizationId || null);
     next();
   } catch (err) {
     return res.status(401).json({
@@ -146,57 +150,7 @@ const authorize = (...roles) => (req, res, next) => {
   });
 };
 
-/**
- * 💳 Require Active Subscription Plan (Enforces Paid Access for Organizations)
- */
-const requireActivePlan = async (req, res, next) => {
-  try {
-    const userRole = (req.user?.role || '').toUpperCase();
-    if (['SUPER_ADMIN', 'SUPERADMIN'].includes(userRole)) {
-      return next();
-    }
-
-    const Organization = require('../models/Organization.model');
-    const orgId = req.organizationId || req.user?.organizationId?._id || req.user?.organizationId;
-    if (!orgId) {
-      return res.status(403).json({
-        success: false,
-        planRequired: true,
-        message: 'No organization account found.',
-      });
-    }
-
-    const org = await Organization.findById(orgId);
-    if (!org) {
-      return res.status(404).json({ success: false, planRequired: true, message: 'Organization not found' });
-    }
-
-    const hasActivePlan =
-      org.status === 'active' &&
-      org.plan?.expiresAt &&
-      new Date(org.plan.expiresAt) > new Date();
-
-    if (!hasActivePlan) {
-      return res.status(402).json({
-        success: false,
-        planRequired: true,
-        planExpired: true,
-        message: 'Active subscription required. Please purchase a plan in Billing to unlock all features.',
-        organization: {
-          id: org._id,
-          name: org.name,
-          status: org.status,
-          plan: org.plan,
-        },
-      });
-    }
-
-    req.organization = org;
-    next();
-  } catch (err) {
-    next(err);
-  }
-};
+const requireActivePlan = require('./requireActivePlan');
 
 module.exports = {
   protect,

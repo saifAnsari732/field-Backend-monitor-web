@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const { Notification } = require('../models');
 const { autoStopInactiveSessions, reconcileAllActiveSessions } = require('../controllers/tracking.controller');
+const { reconcileAllOrganizations } = require('./subscription.service');
 
 /**
  * Initializes all background cron jobs.
@@ -13,8 +14,14 @@ function getBusinessDate(date = new Date(), timeZone = 'Asia/Kolkata') {
 }
 
 const initCronJobs = (io) => {
+  // ── Immediate Startup Check: Reconcile Expired Subscriptions ─────────────
+  try {
+    reconcileAllOrganizations(io);
+  } catch (startupSubErr) {
+    console.error('Failed to run initial subscription reconciliation:', startupSubErr.message);
+  }
+
   // ── 1-Day Boundary Rollover & Midnight Reset (Daily at 00:00:00 Asia/Kolkata) ──
-  // User Rule: "only 1 day baad km reset hoga"
   cron.schedule('0 0 * * *', async () => {
     try {
       const yesterday = getBusinessDate(new Date(Date.now() - 24 * 60 * 60 * 1000), 'Asia/Kolkata');
@@ -54,8 +61,18 @@ const initCronJobs = (io) => {
   }, {
     timezone: 'Asia/Kolkata'
   });
+
+  // ─── Autonomous Subscription Expiry Guardian (Runs Every 15 Minutes) ───────
+  // Scans all organizations and auto-locks access when expiresAt timestamp passes
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await reconcileAllOrganizations(io);
+    } catch (subCronErr) {
+      console.error('❌ [CRON] Error running subscription expiry guardian:', subCronErr.message);
+    }
+  });
+
   // ─── Continuous Background Sentinel Reconciliation Worker (Runs Every 1 Min) ──
-  // Reverses any remote auto-stop closures & keeps active sessions alive
   cron.schedule('* * * * *', async () => {
     try {
       if (typeof reconcileAllActiveSessions === 'function') {
@@ -66,12 +83,11 @@ const initCronJobs = (io) => {
     }
   });
 
-  // Run at minute 0 past every hour: '0 * * * *'
+  // ── Hourly Notification Cleanup ──
   cron.schedule('0 * * * *', async () => {
     try {
       console.log('⏳ [CRON] Running hourly pending notification check...');
       
-      // Auto-cleanup legacy auto-stop notifications so old DB entries don't trigger reminders
       await Notification.updateMany(
         { 
           $or: [
@@ -83,19 +99,14 @@ const initCronJobs = (io) => {
         { $set: { isRead: true } }
       ).catch(() => {});
 
-      // Find all unread notifications grouped by recipient
       const unreadStats = await Notification.aggregate([
         { $match: { isRead: false } },
         { $group: { _id: '$recipient', count: { $sum: 1 } } }
       ]);
 
       if (unreadStats.length === 0) {
-        console.log('✅ [CRON] No pending notifications found.');
         return;
       }
-
-      // Hourly notification reminder socket emission disabled to prevent spamming phone notifications.
-      // Notifications remain accessible in the app's notification center.
       console.log(`[CRON] Pending notifications check completed for ${unreadStats.length} users.`);
     } catch (error) {
       console.error('❌ [CRON] Error running pending notification check:', error.message);

@@ -114,6 +114,12 @@ exports.login = async (req, res) => {
     const normalizedRole = userObj.role ? userObj.role.toUpperCase() : 'EMPLOYEE';
     userObj.role = normalizedRole;
 
+    let subscription = null;
+    if (user.organizationId) {
+      const { evaluateSubscription } = require('../services/subscription.service');
+      subscription = await evaluateSubscription(user.organizationId, req.app?.get('io'));
+    }
+
     res.json({
       success: true,
       token: accessToken,
@@ -121,6 +127,7 @@ exports.login = async (req, res) => {
       refreshToken,
       user: userObj,
       organization: user.organizationId || null,
+      subscription,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -178,6 +185,12 @@ exports.refreshToken = async (req, res) => {
     const userObj = user.toJSON();
     userObj.role = userObj.role ? userObj.role.toUpperCase() : 'EMPLOYEE';
 
+    let subscription = null;
+    if (user.organizationId) {
+      const { evaluateSubscription } = require('../services/subscription.service');
+      subscription = await evaluateSubscription(user.organizationId, req.app?.get('io'));
+    }
+
     res.json({
       success: true,
       token: tokens.accessToken,
@@ -185,6 +198,7 @@ exports.refreshToken = async (req, res) => {
       refreshToken: tokens.refreshToken,
       user: userObj,
       organization: user.organizationId || null,
+      subscription,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -222,7 +236,19 @@ exports.getMe = async (req, res) => {
     .populate('organizationId', 'name slug logo status plan settings');
   const userObj = user.toJSON();
   userObj.role = userObj.role ? userObj.role.toUpperCase() : 'EMPLOYEE';
-  res.json({ success: true, user: userObj, organization: user.organizationId || null });
+
+  let subscription = null;
+  if (user.organizationId) {
+    const { evaluateSubscription } = require('../services/subscription.service');
+    subscription = await evaluateSubscription(user.organizationId, req.app?.get('io'));
+  }
+
+  res.json({
+    success: true,
+    user: userObj,
+    organization: user.organizationId || null,
+    subscription,
+  });
 };
 
 // @desc Update profile

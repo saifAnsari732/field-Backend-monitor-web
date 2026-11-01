@@ -40,10 +40,27 @@ const couponSchema = new mongoose.Schema(
       default: 100,
       min: 1,
     },
+    maxUsesPerOrg: {
+      type: Number,
+      default: 1, // Max times a single organization can redeem this coupon
+      min: 1,
+    },
     usedCount: {
       type: Number,
       default: 0,
       min: 0,
+    },
+    applicablePlans: {
+      type: [String],
+      default: ['all'], // 'all', 'starter', 'pro', 'enterprise'
+    },
+    firstTimeOnly: {
+      type: Boolean,
+      default: false,
+    },
+    validFrom: {
+      type: Date,
+      default: Date.now,
     },
     validTill: {
       type: Date,
@@ -54,6 +71,11 @@ const couponSchema = new mongoose.Schema(
       default: true,
       index: true,
     },
+    totalSavingsGenerated: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -62,5 +84,7 @@ const couponSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+couponSchema.index({ code: 1, isActive: 1 });
 
 module.exports = mongoose.model('Coupon', couponSchema);

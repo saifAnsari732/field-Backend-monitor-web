@@ -7,6 +7,7 @@ router.use(authenticate, checkRole('SUPER_ADMIN'));
 
 router.get('/stats', superadminController.getSuperAdminStats);
 router.get('/organizations', superadminController.getAllOrganizations);
+router.get('/organizations/:id/details', superadminController.getOrganizationDetails);
 router.post('/organizations', superadminController.createOrganization);
 router.patch('/organizations/:id/status', superadminController.updateOrganizationStatus);
 router.patch('/organizations/:id/subscription', superadminController.updateOrgSubscription);
@@ -14,7 +15,9 @@ router.get('/payments', superadminController.getAllPayments);
 
 // Coupon Management Routes
 router.get('/coupons', superadminController.getAllCoupons);
+router.get('/coupons/analytics', superadminController.getCouponAnalytics);
 router.post('/coupons', superadminController.createCoupon);
+router.put('/coupons/:id', superadminController.updateCoupon);
 router.patch('/coupons/:id/toggle', superadminController.toggleCouponStatus);
 router.delete('/coupons/:id', superadminController.deleteCoupon);
 

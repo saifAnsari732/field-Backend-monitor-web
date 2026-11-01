@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { protect, authorize } = require('../middleware/auth.middleware');
+const { protect, authorize, requireActivePlan } = require('../middleware/auth.middleware');
+
+router.use(protect, requireActivePlan);
 const User = require('../models/User.model');
 
 router.get('/', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), async (req, res) => {

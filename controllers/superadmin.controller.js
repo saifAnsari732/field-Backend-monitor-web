@@ -163,6 +163,88 @@ exports.getAllOrganizations = async (req, res) => {
   }
 };
 
+// Get Detailed Structured Organization Breakdown (360 Degree View for SuperAdmin)
+exports.getOrganizationDetails = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const Organization = require('../models/Organization.model');
+    const User = require('../models/User.model');
+    const Payment = require('../models/Payment.model');
+    const { Attendance, LiveLocation, Meeting, Expense, Task, Lead } = require('../models/index');
+    const { evaluateSubscription } = require('../services/subscription.service');
+
+    const org = await Organization.findById(id);
+    if (!org) return res.status(404).json({ success: false, message: 'Organization not found.' });
+
+    // 1. Resolve Admin user
+    const adminUser = await User.findOne({
+      organizationId: org._id,
+      role: { $in: ['ADMIN', 'ORG_ADMIN', 'admin', 'org_admin', 'HR', 'hr'] },
+    }).select('-password');
+
+    // 2. Resolve users counts
+    const [employeesCount, managersCount, activeUsersCount] = await Promise.all([
+      User.countDocuments({ organizationId: org._id, role: { $in: ['EMPLOYEE', 'employee', 'FIELD_EXECUTIVE'] } }),
+      User.countDocuments({ organizationId: org._id, role: { $in: ['MANAGER', 'manager'] } }),
+      User.countDocuments({ organizationId: org._id, isActive: true }),
+    ]);
+
+    // 3. Operational Counts
+    const [attendanceCount, trackingSessionsCount, meetingsCount, expensesCount, tasksCount, leadsCount] = await Promise.all([
+      Attendance.countDocuments({ organizationId: org._id }).catch(() => 0),
+      LiveLocation.countDocuments({ organizationId: org._id }).catch(() => 0),
+      Meeting.countDocuments({ organizationId: org._id }).catch(() => 0),
+      Expense.countDocuments({ organizationId: org._id }).catch(() => 0),
+      Task.countDocuments({ organizationId: org._id }).catch(() => 0),
+      Lead.countDocuments({ organizationId: org._id }).catch(() => 0),
+    ]);
+
+    // 4. Financial / Payment History
+    const payments = await Payment.find({ organization: org._id }).sort({ createdAt: -1 }).limit(10);
+    const totalRevenuePaid = payments.reduce((acc, p) => (p.status === 'paid' ? acc + (p.amount || 0) : acc), 0);
+
+    // 5. Subscription Evaluation
+    const subEvaluation = await evaluateSubscription(org);
+
+    // 6. Recent Members
+    const recentMembers = await User.find({ organizationId: org._id })
+      .select('name email phone role department designation isActive isBlocked createdAt')
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    res.json({
+      success: true,
+      data: {
+        organization: org,
+        adminUser: adminUser || null,
+        subscription: subEvaluation,
+        capacity: {
+          employees: employeesCount,
+          maxEmployees: org.plan?.maxEmployees || 50,
+          employeeUtilization: Math.round((employeesCount / Math.max(1, org.plan?.maxEmployees || 50)) * 100),
+          managers: managersCount,
+          maxManagers: org.plan?.maxManagers || 10,
+          managerUtilization: Math.round((managersCount / Math.max(1, org.plan?.maxManagers || 10)) * 100),
+          activeUsers: activeUsersCount,
+        },
+        operations: {
+          attendanceCount,
+          trackingSessionsCount,
+          meetingsCount,
+          expensesCount,
+          tasksCount,
+          leadsCount,
+          totalRevenuePaid,
+        },
+        recentMembers,
+        payments,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // Update Organization Status (Activate / Suspend)
 exports.updateOrganizationStatus = async (req, res) => {
   try {
@@ -294,18 +376,33 @@ exports.getAllPayments = async (req, res) => {
 // 🎟️ SUPER ADMIN COUPON MANAGEMENT
 // ============================================================================
 
-// 1. Get All Coupons
+// 1. Get All Coupons with Usage Metrics
 exports.getAllCoupons = async (req, res) => {
   try {
     const Coupon = require('../models/Coupon.model');
     const coupons = await Coupon.find().sort({ createdAt: -1 });
-    res.json({ success: true, coupons, count: coupons.length });
+
+    const enriched = coupons.map((c) => {
+      const doc = c.toObject();
+      const remainingUses = Math.max(0, (doc.maxUses || 100) - (doc.usedCount || 0));
+      const isExpired = doc.validTill ? new Date(doc.validTill) < new Date() : false;
+      const usagePercentage = doc.maxUses ? Math.min(100, Math.round(((doc.usedCount || 0) / doc.maxUses) * 100)) : 0;
+
+      return {
+        ...doc,
+        remainingUses,
+        isExpired,
+        usagePercentage,
+      };
+    });
+
+    res.json({ success: true, coupons: enriched, count: enriched.length });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// 2. Create New Coupon
+// 2. Create New Promotional Coupon
 exports.createCoupon = async (req, res) => {
   try {
     const Coupon = require('../models/Coupon.model');
@@ -317,6 +414,10 @@ exports.createCoupon = async (req, res) => {
       minOrderAmount,
       maxDiscountAmount,
       maxUses,
+      maxUsesPerOrg,
+      applicablePlans,
+      firstTimeOnly,
+      validFrom,
       validTill,
     } = req.body;
 
@@ -324,7 +425,11 @@ exports.createCoupon = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Coupon code and discount value are required.' });
     }
 
-    const cleanCode = code.toUpperCase().trim();
+    const cleanCode = String(code).toUpperCase().replace(/[^A-Z0-9_-]/g, '').trim();
+    if (!cleanCode) {
+      return res.status(400).json({ success: false, message: 'Invalid coupon code format. Use letters, numbers, and dashes.' });
+    }
+
     const existing = await Coupon.findOne({ code: cleanCode });
     if (existing) {
       return res.status(400).json({ success: false, message: `Coupon with code "${cleanCode}" already exists.` });
@@ -332,20 +437,25 @@ exports.createCoupon = async (req, res) => {
 
     const newCoupon = await Coupon.create({
       code: cleanCode,
-      description: description || '',
+      description: description ? description.trim() : '',
       discountType: discountType || 'percentage',
       discountValue: Number(discountValue),
       minOrderAmount: minOrderAmount ? Number(minOrderAmount) : 0,
       maxDiscountAmount: maxDiscountAmount ? Number(maxDiscountAmount) : null,
       maxUses: maxUses ? Number(maxUses) : 100,
+      maxUsesPerOrg: maxUsesPerOrg ? Number(maxUsesPerOrg) : 1,
+      applicablePlans: Array.isArray(applicablePlans) && applicablePlans.length > 0 ? applicablePlans : ['all'],
+      firstTimeOnly: Boolean(firstTimeOnly),
+      validFrom: validFrom ? new Date(validFrom) : new Date(),
       validTill: validTill ? new Date(validTill) : null,
       isActive: true,
+      totalSavingsGenerated: 0,
       createdBy: req.user?._id || null,
     });
 
     res.status(201).json({
       success: true,
-      message: `Coupon "${cleanCode}" created successfully!`,
+      message: `🎉 Coupon "${cleanCode}" created successfully!`,
       coupon: newCoupon,
     });
   } catch (error) {
@@ -353,7 +463,53 @@ exports.createCoupon = async (req, res) => {
   }
 };
 
-// 3. Toggle Coupon Active / Inactive
+// 3. Update Existing Coupon
+exports.updateCoupon = async (req, res) => {
+  try {
+    const Coupon = require('../models/Coupon.model');
+    const { id } = req.params;
+    const {
+      description,
+      discountType,
+      discountValue,
+      minOrderAmount,
+      maxDiscountAmount,
+      maxUses,
+      maxUsesPerOrg,
+      applicablePlans,
+      firstTimeOnly,
+      validTill,
+      isActive,
+    } = req.body;
+
+    const coupon = await Coupon.findById(id);
+    if (!coupon) return res.status(404).json({ success: false, message: 'Coupon not found.' });
+
+    if (description !== undefined) coupon.description = description.trim();
+    if (discountType !== undefined) coupon.discountType = discountType;
+    if (discountValue !== undefined) coupon.discountValue = Number(discountValue);
+    if (minOrderAmount !== undefined) coupon.minOrderAmount = Number(minOrderAmount);
+    if (maxDiscountAmount !== undefined) coupon.maxDiscountAmount = maxDiscountAmount ? Number(maxDiscountAmount) : null;
+    if (maxUses !== undefined) coupon.maxUses = Number(maxUses);
+    if (maxUsesPerOrg !== undefined) coupon.maxUsesPerOrg = Number(maxUsesPerOrg);
+    if (applicablePlans !== undefined) coupon.applicablePlans = Array.isArray(applicablePlans) ? applicablePlans : ['all'];
+    if (firstTimeOnly !== undefined) coupon.firstTimeOnly = Boolean(firstTimeOnly);
+    if (validTill !== undefined) coupon.validTill = validTill ? new Date(validTill) : null;
+    if (isActive !== undefined) coupon.isActive = Boolean(isActive);
+
+    await coupon.save();
+
+    res.json({
+      success: true,
+      message: `Coupon "${coupon.code}" updated successfully!`,
+      coupon,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// 4. Toggle Coupon Active / Inactive
 exports.toggleCouponStatus = async (req, res) => {
   try {
     const Coupon = require('../models/Coupon.model');
@@ -375,7 +531,7 @@ exports.toggleCouponStatus = async (req, res) => {
   }
 };
 
-// 4. Delete Coupon
+// 5. Delete Coupon
 exports.deleteCoupon = async (req, res) => {
   try {
     const Coupon = require('../models/Coupon.model');
@@ -387,6 +543,44 @@ exports.deleteCoupon = async (req, res) => {
     res.json({
       success: true,
       message: `Coupon "${coupon.code}" deleted successfully.`,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// 6. Get High-Level Coupon Analytics & Redemptions
+exports.getCouponAnalytics = async (req, res) => {
+  try {
+    const Coupon = require('../models/Coupon.model');
+    const Payment = require('../models/Payment.model');
+
+    const totalCoupons = await Coupon.countDocuments();
+    const activeCoupons = await Coupon.countDocuments({ isActive: true });
+    
+    // Aggregate total redemptions & savings from Coupon collection
+    const savingsAgg = await Coupon.aggregate([
+      { $group: { _id: null, totalSavings: { $sum: '$totalSavingsGenerated' }, totalUsed: { $sum: '$usedCount' } } }
+    ]);
+
+    const totalSavings = savingsAgg[0]?.totalSavings || 0;
+    const totalRedemptions = savingsAgg[0]?.totalUsed || 0;
+
+    // Recent coupon checkout payments
+    const recentRedemptions = await Payment.find({ 'notes.couponCode': { $exists: true, $ne: '' }, status: 'paid' })
+      .populate('organization', 'name email phone')
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    res.json({
+      success: true,
+      analytics: {
+        totalCoupons,
+        activeCoupons,
+        totalSavings,
+        totalRedemptions,
+        recentRedemptions,
+      },
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
