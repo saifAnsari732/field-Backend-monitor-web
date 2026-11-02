@@ -33,13 +33,50 @@ const corsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'x-organization-id',
+    'X-Organization-Id',
+    'x-api-key',
+    'X-Api-Key',
+    'x-razorpay-signature',
+    'X-Razorpay-Signature',
+    'x-socket-id',
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+  ],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
   maxAge: 86400,
 };
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+
+// 🛡️ Global Pre-Flight & CORS Header Middleware (Guarantees zero preflight blocks on Render/Vercel)
+app.use((req, res, next) => {
+  const reqOrigin = req.headers.origin;
+  if (reqOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    req.headers['access-control-request-headers'] ||
+      'Content-Type, Authorization, X-Requested-With, Accept, Origin, x-organization-id, X-Organization-Id, x-api-key, X-Api-Key, x-razorpay-signature, X-Razorpay-Signature, x-socket-id, Cache-Control, Pragma'
+  );
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
 
 // Socket.IO setup
 const io = new Server(server, {

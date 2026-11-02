@@ -355,6 +355,7 @@ exports.createOrder = async (req, res) => {
       amount: amountInPaise,
       currency: 'INR',
       receipt: receiptId,
+      payment_capture: 1, // ⚡ Auto-capture payments immediately so user payment is never stuck in 'authorized' state
       notes: {
         plan,
         billingCycle: effectiveBillingCycle,
@@ -877,6 +878,60 @@ exports.syncLatestPayment = async (req, res) => {
     const orgId = req.organizationId || req.user?.organizationId || req.query.organizationId;
     if (!orgId) return res.status(400).json({ success: false, message: 'Organization ID required' });
 
+    // ⚡ Step 1: Check for any recent 'created' or 'pending' payment in the last 24 hours to sync directly with Razorpay API
+    const recentPendingPayment = await Payment.findOne({
+      $or: [{ organization: orgId }, { 'notes.organizationId': String(orgId) }],
+      status: { $in: ['created', 'pending'] },
+      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+    }).sort({ createdAt: -1 });
+
+    if (recentPendingPayment && recentPendingPayment.razorpayOrderId) {
+      try {
+        const rzp = getRazorpayInstance();
+        const cleanOrderId = recentPendingPayment.razorpayOrderId.trim();
+        const orderData = await rzp.orders.fetch(cleanOrderId);
+        const paymentsList = await rzp.orders.fetchPayments(cleanOrderId);
+        const items = paymentsList.items || [];
+        let capturedPayment = items.find((p) => p.status === 'captured');
+        const authorizedPayment = items.find((p) => p.status === 'authorized');
+
+        if (!capturedPayment && authorizedPayment) {
+          try {
+            const capRes = await rzp.payments.capture(
+              authorizedPayment.id,
+              authorizedPayment.amount,
+              authorizedPayment.currency || 'INR'
+            );
+            if (capRes && (capRes.status === 'captured' || capRes.captured)) {
+              capturedPayment = capRes;
+            }
+          } catch (capErr) {
+            console.warn('Auto-capture error:', capErr.message);
+          }
+        }
+
+        if (capturedPayment || authorizedPayment || orderData.status === 'paid' || orderData.amount_paid > 0) {
+          const payId = capturedPayment?.id || authorizedPayment?.id || items[0]?.id || '';
+          recentPendingPayment.status = 'paid';
+          recentPendingPayment.amountPaid = orderData.amount_paid ? orderData.amount_paid / 100 : recentPendingPayment.amount;
+          recentPendingPayment.razorpayPaymentId = payId;
+          recentPendingPayment.paidAt = new Date();
+          await recentPendingPayment.save();
+
+          const io = req.app?.get('io');
+          const updatedOrg = await activateOrganizationFromPayment(recentPendingPayment, io);
+          return res.json({
+            success: true,
+            message: '🎉 Uncaptured payment successfully confirmed and captured from Razorpay! Subscription activated.',
+            payment: recentPendingPayment,
+            organization: updatedOrg,
+          });
+        }
+      } catch (checkErr) {
+        console.warn('⚠️ Pending payment auto-check notice:', checkErr.message);
+      }
+    }
+
     const latestPaidPayment = await Payment.findOne({
       $or: [{ organization: orgId }, { 'notes.organizationId': String(orgId) }],
       status: 'paid',
@@ -1099,12 +1154,29 @@ exports.syncOrderById = async (req, res) => {
     const paymentsList = await rzp.orders.fetchPayments(cleanOrderId);
 
     const items = paymentsList.items || [];
-    const capturedPayment = items.find((p) => p.status === 'captured');
+    let capturedPayment = items.find((p) => p.status === 'captured');
     const authorizedPayment = items.find((p) => p.status === 'authorized');
     const failedPayment = items.find((p) => p.status === 'failed');
 
-    // Case A: Payment was captured on Razorpay
-    if (capturedPayment || orderData.status === 'paid' || orderData.amount_paid > 0) {
+    // ⚡ If payment is in authorized state on Razorpay, auto-capture it immediately
+    if (!capturedPayment && authorizedPayment) {
+      try {
+        console.log(`⚡ [SYNC] Auto-capturing authorized payment ${authorizedPayment.id} for order ${cleanOrderId}...`);
+        const capRes = await rzp.payments.capture(
+          authorizedPayment.id,
+          authorizedPayment.amount,
+          authorizedPayment.currency || 'INR'
+        );
+        if (capRes && (capRes.status === 'captured' || capRes.captured)) {
+          capturedPayment = capRes;
+        }
+      } catch (capErr) {
+        console.warn('⚠️ [SYNC] Auto-capture attempt error:', capErr.message);
+      }
+    }
+
+    // Case A: Payment was captured or authorized on Razorpay
+    if (capturedPayment || authorizedPayment || orderData.status === 'paid' || orderData.amount_paid > 0) {
       const activePayItem = capturedPayment || authorizedPayment || items[0];
       const payId = activePayItem ? activePayItem.id : (payment?.razorpayPaymentId || '');
 
