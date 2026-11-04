@@ -683,7 +683,7 @@ exports.getTrackingHistory = async (req, res) => {
         const verifiedKm = Math.round(ledgerAgg[0].totalKm * 100) / 100;
         const manualAdded = Number(s.manualDistanceAdded || 0);
         const finalKm = Math.round((verifiedKm + manualAdded) * 100) / 100;
-        const cleanSessionDist = finalKm > 0 ? finalKm : Number(s.totalDistance || 0);
+        const cleanSessionDist = Math.max(finalKm, Number(s.totalDistance || 0), Number(s.officialDistance || 0));
         s.totalDistance = cleanSessionDist;
         s.officialDistance = cleanSessionDist;
       } else if (Number(s.manualDistanceAdded || 0) > 0 || Number(s.totalDistance || 0) > 0) {
