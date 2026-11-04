@@ -125,15 +125,42 @@ exports.getConsolidatedReport = async (req, res) => {
       });
     });
 
+    // Also include attendance records in dailyDistanceMap so no attendance travel is ever missed
+    attendances.forEach((att) => {
+      const dateKey = att.date || (att.createdAt ? new Date(att.createdAt).toISOString().slice(0, 10) : null);
+      if (!dateKey) return;
+      const attDist = Number(att.totalDistanceTraveled) || 0;
+      if (!dailyDistanceMap[dateKey]) {
+        dailyDistanceMap[dateKey] = {
+          date: dateKey,
+          totalDistance: attDist,
+          sessionsCount: 0,
+          manualDistanceAdded: 0,
+          startAddress: '',
+          endAddress: '',
+          firstStartTime: att.checkIn,
+          lastEndTime: att.checkOut,
+          sessions: [],
+        };
+      } else {
+        // Reconcile: Take the maximum of session distance and attendance distance
+        dailyDistanceMap[dateKey].totalDistance = Math.max(dailyDistanceMap[dateKey].totalDistance, attDist);
+      }
+    });
+
     const dailyDistances = Object.values(dailyDistanceMap)
-      .map((item) => ({
-        ...item,
-        totalDistance: parseFloat(item.totalDistance.toFixed(2)),
-        travelPay: parseFloat((item.totalDistance * taRate).toFixed(2)),
-      }))
+      .map((item) => {
+        // Cap single-day travel at sane human maximum (600 km) to permanently defend against GPS anomalies
+        const cappedKm = Math.min(item.totalDistance, 600);
+        return {
+          ...item,
+          totalDistance: parseFloat(cappedKm.toFixed(2)),
+          travelPay: parseFloat((cappedKm * taRate).toFixed(2)),
+        };
+      })
       .sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    const totalKm = parseFloat(locations.reduce((a, b) => a + (Number(b.totalDistance) || 0), 0).toFixed(2));
+    const totalKm = parseFloat(dailyDistances.reduce((a, b) => a + (Number(b.totalDistance) || 0), 0).toFixed(2));
     const travelPay = parseFloat((totalKm * taRate).toFixed(2));
     
     // Filter and compute DA history
