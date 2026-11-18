@@ -28,9 +28,13 @@ exports.getMyMeetings = async (req, res) => {
 
 exports.updateMeeting = async (req, res) => {
   try {
-    const meeting = await Meeting.findOneAndUpdate(
-      { _id: req.params.id, employee: req.user._id }, req.body, { new: true }
-    );
+    const filter = { _id: req.params.id };
+    const userRole = (req.user?.role || '').toLowerCase();
+    const isAdminRole = ['admin', 'org_admin', 'super_admin', 'hr', 'manager'].includes(userRole);
+    if (!isAdminRole) {
+      filter.employee = req.user._id;
+    }
+    const meeting = await Meeting.findOneAndUpdate(filter, req.body, { new: true });
     if (!meeting) return res.status(404).json({ success: false, message: 'Meeting not found' });
     res.json({ success: true, meeting });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
@@ -560,7 +564,7 @@ exports.getAllMeetings = async (req, res) => {
     }
 
     if (status) filter.status = status;
-    const meetings = await Meeting.find(filter).populate('employee', 'name employeeId department').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(+limit);
+    const meetings = await Meeting.find(filter).populate('employee', 'name employeeId department avatar').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(+limit);
     const total = await Meeting.countDocuments(filter);
     res.json({ success: true, meetings, total, pages: Math.ceil(total / limit) });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }

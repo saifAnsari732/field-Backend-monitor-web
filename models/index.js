@@ -128,9 +128,13 @@ const meetingSchema = new mongoose.Schema({
   dealAmount: { type: Number, default: 0 },
   followUpDate: Date,
   images: [String],
+  selfieUrl: { type: String, default: null },
+  selfie: { type: String, default: null },
+  photo: { type: String, default: null },
+  checkInImage: { type: String, default: null },
   location: { lat: Number, lng: Number },
   date: { type: Date, default: Date.now },
-}, { timestamps: true });
+}, { timestamps: true, strict: false });
 
 meetingSchema.index({ organizationId: 1, employee: 1, date: -1 });
 meetingSchema.index({ organizationId: 1, status: 1 });
