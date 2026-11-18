@@ -18,6 +18,7 @@ exports.getMyMeetings = async (req, res) => {
   try {
     const { page = 1, limit = 10, status, date } = req.query;
     const filter = { employee: req.user._id };
+    if (date) { const d = new Date(date); filter.date = { $gte: d, $lt: new Date(d.getTime() + 86400000) }; }
     if (status) filter.status = status;
     if (date) { const d = new Date(date); filter.date = { $gte: d, $lt: new Date(d.getTime() + 86400000) }; }
     const meetings = await Meeting.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(+limit);
@@ -40,18 +41,7 @@ exports.updateMeeting = async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-exports.getAllMeetings = async (req, res) => {
-  try {
-    const { page = 1, limit = 10, status, date, employeeId } = req.query;
-    const filter = {};
-    if (status) filter.status = status;
-    if (employeeId) filter.employee = employeeId;
-    if (date) { const d = new Date(date); filter.date = { $gte: d, $lt: new Date(d.getTime() + 86400000) }; }
-    const meetings = await Meeting.find(filter).populate('employee', 'name email employeeId').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(+limit);
-    const total = await Meeting.countDocuments(filter);
-    res.json({ success: true, meetings, total, pages: Math.ceil(total / limit) });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-};
+// (Note: scoped exports.getAllMeetings is defined below)
 
 exports.deleteMeeting = async (req, res) => {
   try {
@@ -546,7 +536,7 @@ exports.approveExpense = async (req, res) => {
 
 exports.getAllMeetings = async (req, res) => {
   try {
-    const { page = 1, limit = 20, employeeId, status } = req.query;
+    const { page = 1, limit = 20, employeeId, status, date } = req.query;
     const filter = {};
 
     const scopedIds = await getScopedEmployeeIds(req.user);
