@@ -395,10 +395,48 @@ exports.approveEmployee = async (req, res) => {
 exports.toggleBlock = async (req, res) => {
   try {
     const employee = await User.findById(req.params.id);
-    employee.isBlocked = !employee.isBlocked;
+    if (!employee) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    const newBlockedState = !employee.isBlocked;
+    employee.isBlocked = newBlockedState;
+
+    if (newBlockedState) {
+      employee.isActive = false;
+      employee.isOnline = false;
+      employee.isTracking = false;
+    } else {
+      employee.isActive = true;
+    }
+
     await employee.save();
-    res.json({ success: true, isBlocked: employee.isBlocked });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+
+    const io = req.app?.get('io');
+    if (io) {
+      if (employee.socketId && newBlockedState) {
+        io.to(employee.socketId).emit('force_logout', { message: 'Your account has been blocked by administrator.' });
+        io.to(employee.socketId).emit('account_blocked', { message: 'Your account has been blocked by administrator.' });
+      }
+      io.emit('employee_status_changed', {
+        employeeId: employee._id,
+        isBlocked: employee.isBlocked,
+        isActive: employee.isActive,
+      });
+    }
+
+    const actionText = employee.isBlocked ? 'blocked' : 'unblocked';
+    res.json({
+      success: true,
+      message: `Employee ${employee.name || 'User'} has been ${actionText} successfully.`,
+      isBlocked: employee.isBlocked,
+      isActive: employee.isActive,
+      employee,
+    });
+  } catch (err) {
+    console.error('Error toggling block status:', err);
+    res.status(500).json({ success: false, message: err.message || 'Failed to update employee block status' });
+  }
 };
 
 exports.updateEmployee = async (req, res) => {

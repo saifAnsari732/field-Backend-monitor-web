@@ -4,6 +4,7 @@ const { protect, authorize, requireActivePlan } = require('../middleware/auth.mi
 
 router.use(protect, requireActivePlan);
 const User = require('../models/User.model');
+const ac = require('../controllers/admin.controller');
 
 router.get('/', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), async (req, res) => {
   try {
@@ -236,6 +237,9 @@ router.get('/:id', protect, async (req, res) => {
     res.json({ success: true, employee });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
+
+router.put('/:id/block', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), requireActivePlan, ac.toggleBlock);
+router.put('/:id/approve', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), requireActivePlan, ac.approveEmployee);
 
 router.put('/:id', protect, authorize('admin', 'hr', 'manager', 'org_admin', 'super_admin'), async (req, res) => {
   try {
