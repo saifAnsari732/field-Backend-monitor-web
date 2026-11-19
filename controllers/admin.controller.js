@@ -394,48 +394,61 @@ exports.approveEmployee = async (req, res) => {
 
 exports.toggleBlock = async (req, res) => {
   try {
-    const employee = await User.findById(req.params.id);
-    if (!employee) {
-      return res.status(404).json({ success: false, message: 'Employee not found' });
+    const targetUser = await User.findById(req.params.id);
+    if (!targetUser) {
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const newBlockedState = !employee.isBlocked;
-    employee.isBlocked = newBlockedState;
+    const newBlockedState = !targetUser.isBlocked;
+    targetUser.isBlocked = newBlockedState;
 
     if (newBlockedState) {
-      employee.isActive = false;
-      employee.isOnline = false;
-      employee.isTracking = false;
+      targetUser.isActive = false;
+      targetUser.isOnline = false;
+      targetUser.isTracking = false;
     } else {
-      employee.isActive = true;
+      targetUser.isActive = true;
     }
 
-    await employee.save();
+    await targetUser.save();
 
     const io = req.app?.get('io');
     if (io) {
-      if (employee.socketId && newBlockedState) {
-        io.to(employee.socketId).emit('force_logout', { message: 'Your account has been blocked by administrator.' });
-        io.to(employee.socketId).emit('account_blocked', { message: 'Your account has been blocked by administrator.' });
+      if (targetUser.socketId && newBlockedState) {
+        io.to(targetUser.socketId).emit('force_logout', { message: 'Your account has been blocked by administrator.' });
+        io.to(targetUser.socketId).emit('account_blocked', { message: 'Your account has been blocked by administrator.' });
+        const targetSocket = io.sockets.sockets?.get(targetUser.socketId);
+        if (targetSocket) {
+          targetSocket.disconnect(true);
+        }
       }
       io.emit('employee_status_changed', {
-        employeeId: employee._id,
-        isBlocked: employee.isBlocked,
-        isActive: employee.isActive,
+        employeeId: targetUser._id,
+        isBlocked: targetUser.isBlocked,
+        isActive: targetUser.isActive,
+      });
+      io.emit('manager_status_changed', {
+        managerId: targetUser._id,
+        isBlocked: targetUser.isBlocked,
+        isActive: targetUser.isActive,
       });
     }
 
-    const actionText = employee.isBlocked ? 'blocked' : 'unblocked';
+    const isManagerRole = ['manager', 'MANAGER'].includes(targetUser.role);
+    const roleLabel = isManagerRole ? 'Manager' : 'Employee';
+    const actionText = targetUser.isBlocked ? 'blocked' : 'unblocked';
     res.json({
       success: true,
-      message: `Employee ${employee.name || 'User'} has been ${actionText} successfully.`,
-      isBlocked: employee.isBlocked,
-      isActive: employee.isActive,
-      employee,
+      message: `${roleLabel} "${targetUser.name || 'User'}" has been ${actionText} successfully.`,
+      isBlocked: targetUser.isBlocked,
+      isActive: targetUser.isActive,
+      user: targetUser,
+      employee: targetUser,
+      manager: targetUser,
     });
   } catch (err) {
     console.error('Error toggling block status:', err);
-    res.status(500).json({ success: false, message: err.message || 'Failed to update employee block status' });
+    res.status(500).json({ success: false, message: err.message || 'Failed to update block status' });
   }
 };
 

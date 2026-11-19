@@ -74,12 +74,12 @@ exports.login = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid email or password.' });
     }
 
-    if (user.isBlocked) {
-      return res.status(403).json({ success: false, message: 'Account is blocked. Please contact your administrator.' });
+    if (user.isBlocked || String(user.isBlocked) === 'true') {
+      return res.status(403).json({ success: false, message: 'Account is blocked. Please contact your administrator.', isBlocked: true });
     }
 
-    if (!user.isActive) {
-      return res.status(403).json({ success: false, message: 'Account is deactivated.' });
+    if (!user.isActive || String(user.isActive) === 'false') {
+      return res.status(403).json({ success: false, message: 'Account is deactivated. Access revoked.', isActive: false });
     }
 
     // Check organization status if user is not Super Admin
